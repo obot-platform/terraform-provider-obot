@@ -10,6 +10,9 @@
   metadata and token previews.
 - `guides/tunnel-aws/` and `guides/tunnel-vault/` publish a newly captured token.
   Use one destination example at a time and configure its provider credentials.
+- `resources/obot_mcp_catalog_entry/` defines a remote catalog entry with fixed
+  and user-supplied headers, with both import forms. `guides/tunnel-catalog-entry/`
+  puts a tunnel behind a catalog entry and grants access to it.
 
 The resource/data-source/guide examples are module snippets. Your root module
 must declare `obot-platform/obot` as the Obot provider source. The

@@ -101,7 +101,7 @@ func (p *ObotProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 }
 
 func (p *ObotProvider) Resources(_ context.Context) []func() resource.Resource {
-	return []func() resource.Resource{newMCPTunnelResource, newMCPCatalogSourceResource, newMCPAccessRuleResource, newGitCredentialResource}
+	return []func() resource.Resource{newMCPTunnelResource, newMCPCatalogSourceResource, newMCPAccessRuleResource, newGitCredentialResource, newMCPCatalogEntryResource}
 }
 
 func (p *ObotProvider) DataSources(_ context.Context) []func() datasource.DataSource {

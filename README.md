@@ -1,10 +1,14 @@
 # Terraform Provider for Obot
 
+> [!WARNING]
+> This provider is under active development. Resources, attributes, and
+> behavior are subject to change.
+
 A Terraform provider for Obot, built with the Terraform Plugin Framework.
 
 The provider connects with an API-scoped key and manages MCP tunnels,
-individual default MCP catalog sources, Git credentials for private sources,
-and catalog MCP access policies. Read-only data sources expose current
+individual default MCP catalog sources, remote MCP catalog entries, Git
+credentials for private sources, and catalog MCP access policies. Read-only data sources expose current
 identity, authentication-provider metadata, tunnel metadata, catalog
 inventory, Git credential IDs, and access policies. It is published on the
 Terraform Registry as [`obot-platform/obot`](https://registry.terraform.io/providers/obot-platform/obot).
@@ -352,7 +356,14 @@ use a protected backend.
 The [tunnel guide](docs/guides/mcp-tunnels.md) walks through creation, AWS and
 Vault publication, agent startup, import, rotation, recovery, and deletion.
 See the [resource reference](docs/resources/mcp_tunnel.md) for its schema and
-both import forms. Catalog-entry management is not implemented yet.
+both import forms.
+
+To put a tunnel behind a catalog entry, use `obot_mcp_catalog_entry`, which
+manages remote entries created directly in the default catalog, and grant
+access with `obot_mcp_access_rule`. Obot does not accept tunnel references in
+entries synchronized from a catalog source. Header values are write-only
+(`value_wo`, Terraform 1.11+). See the
+[resource reference](docs/resources/mcp_catalog_entry.md).
 
 Acceptance tests cover creation, metadata changes, empty allowlists, stable
 refresh, explicit rotation, live CLI connectivity and revoked-token rejection,

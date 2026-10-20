@@ -205,6 +205,74 @@ func TestCatalogDataSourceInventory(t *testing.T) {
 	}
 }
 
+func TestCatalogDataSourceStripsSourceCredentials(t *testing.T) {
+	// Obot accepts source URLs with a Git token as userinfo and reports them
+	// unchanged; none of the token may reach state.
+	const withPassword = "https://x-access-token:ghp_password123@github.com/example/one"
+	const withToken = "https://ghp_usertoken456@github.com/example/two"
+	// Obot keeps a source apart from one differing only in credentials.
+	const sameRepo = "https://ghp_othertoken789@github.com/example/two"
+	const withQuery = "https://gitlab.example/raw?private_token=glpat-querytoken0&ref=main"
+	conn := testManagementClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/entries") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{
+				{"id": "entry1", "manifest": map[string]string{"name": "One"}, "sourceURL": withPassword},
+				{"id": "entry2", "manifest": map[string]string{"name": "Two"}, "sourceURL": withToken},
+			}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "default", "sourceURLs": []string{withPassword, withToken, sameRepo, withQuery, "https://github.com/example/public"},
+			"sourceURLGitCredentialIDs": map[string]string{withPassword: "gc1one", withToken: "gc1two", sameRepo: "gc1three"},
+			"syncErrors": map[string]string{
+				withToken:    "fatal: Authentication failed for '" + withToken + "'",
+				withPassword: "clone of " + withPassword + " failed; credential ghp_password123 rejected",
+				sameRepo:     "fatal: repository not found via " + sameRepo,
+				withQuery:    "failed to read catalog " + withQuery + ": 401; token glpat-querytoken0 expired; ref main",
+			},
+		})
+	})
+	d := &mcpCatalogDataSource{client: conn}
+	var schema datasource.SchemaResponse
+	d.Schema(t.Context(), datasource.SchemaRequest{}, &schema)
+	state := tfsdk.State{Schema: schema.Schema}
+	model := catalogDataModel{ID: types.StringValue("default"), Sources: types.SetNull(types.StringType), GitCredentialIDs: types.MapNull(types.StringType), SyncErrors: types.MapNull(types.StringType), Entries: types.ListNull(types.ObjectType{AttrTypes: map[string]attr.Type{"id": types.StringType, "name": types.StringType, "source_url": types.StringType}})}
+	if ds := state.Set(t.Context(), &model); ds.HasError() {
+		t.Fatal(ds)
+	}
+	response := datasource.ReadResponse{State: state}
+	d.Read(t.Context(), datasource.ReadRequest{Config: tfsdk.Config(state)}, &response)
+	if response.Diagnostics.HasError() {
+		t.Fatal(response.Diagnostics)
+	}
+	raw := response.State.Raw.String()
+	for _, secret := range []string{"ghp_password123", "ghp_usertoken456", "ghp_othertoken789", "x-access-token", "glpat-querytoken0"} {
+		if strings.Contains(raw, secret) {
+			t.Fatalf("state contains %q: %s", secret, raw)
+		}
+	}
+	for _, want := range []string{"https://github.com/example/one", "https://github.com/example/public", "gc1one",
+		"https://gitlab.example/raw?private_token=REDACTED&ref=REDACTED", "ref main"} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("state lost %q: %s", want, raw)
+		}
+	}
+	model = catalogDataModel{}
+	if ds := response.State.Get(t.Context(), &model); ds.HasError() {
+		t.Fatal(ds)
+	}
+	// The two sources for example/two share a key, keeping both values.
+	ids := map[string]string{}
+	errors := map[string]string{}
+	model.GitCredentialIDs.ElementsAs(t.Context(), &ids, false)
+	model.SyncErrors.ElementsAs(t.Context(), &errors, false)
+	two := "https://github.com/example/two"
+	if ids[two] != "gc1three, gc1two" || !strings.Contains(errors[two], "Authentication failed") ||
+		!strings.Contains(errors[two], "repository not found") || len(model.Sources.Elements()) != 4 {
+		t.Fatalf("colliding sources lost values: ids=%v errors=%q sources=%v", ids, errors[two], model.Sources)
+	}
+}
+
 // Verify the framework schema of every new object, including nested collections.
 func TestManagementSchemas(t *testing.T) {
 	for _, r := range []resource.Resource{newMCPCatalogSourceResource(), newMCPAccessRuleResource()} {

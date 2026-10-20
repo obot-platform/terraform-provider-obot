@@ -4,13 +4,15 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  # Builds, lints, and unit tests the provider. Everything else waits for it.
+  # The organization requires a check named build, so it has no display name.
   build:
-    name: Build, lint, and unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -30,6 +32,7 @@ jobs:
 
   generate:
     name: Documentation and Terraform smoke checks
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -48,3 +51,35 @@ jobs:
       - run: make generate dev-check
       - name: Check generated documentation
         run: git diff --exit-code
+
+  acceptance:
+    name: Obot ${{ matrix.obot }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        obot: [main, v0.26.3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Building the main Obot CLI requires Go 1.27; the provider itself
+      # continues to support the Go version declared in go.mod.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+          cache: true
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: '1.14.0'
+          terraform_wrapper: false
+      - name: Check local authentication and instance isolation
+        run: make test-smoke OBOT_REF="${{ matrix.obot }}" OBOT_INSTANCES=2
+      - name: Run Terraform acceptance tests
+        run: make test-acceptance-fresh OBOT_REF="${{ matrix.obot }}" OBOT_INSTANCES=2
+      - name: Show sanitized failure logs
+        if: failure()
+        run: |
+          if [ -d .obot/logs ]; then
+            find .obot/logs -name '*.log' -exec cat {} +
+          fi

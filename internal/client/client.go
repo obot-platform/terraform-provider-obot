@@ -213,3 +213,19 @@ func (c *Client) CurrentUser(ctx context.Context) (*User, error) {
 	}
 	return &user, nil
 }
+
+// BaseURL returns the normalized API base URL, which always ends in /api.
+// Obot's own clients, such as obot tunnel, accept it as --obot-base-url.
+func (c *Client) BaseURL() string { return c.baseURL }
+
+// ServerVersion returns the Obot server version reported by GET /version,
+// such as v0.15.0. It is empty when the server does not report one.
+func (c *Client) ServerVersion(ctx context.Context) (string, error) {
+	var version struct {
+		Obot string `json:"obot"`
+	}
+	if err := c.request(ctx, http.MethodGet, "/version", "", &version); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(version.Obot), nil
+}

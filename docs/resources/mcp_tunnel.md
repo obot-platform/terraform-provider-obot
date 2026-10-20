@@ -3,12 +3,12 @@
 page_title: "obot_mcp_tunnel Resource - obot"
 subcategory: ""
 description: |-
-  Manages an MCP tunnel definition. Requires an Obot Admin or Owner. The tunnel can be created before an agent connects. The full token is captured only on creation or explicit rotation, is sensitive, and is stored in Terraform state. Import adopts the definition without changing credentials and leaves token null. Match existing metadata and keep token_rotation_version at 0 for adoption. See the tunnel guide ../guides/mcp-tunnels.md for import, secret-manager publication, rotation, and recovery.
+  Manages an MCP tunnel definition. Requires an Obot Admin or Owner. The tunnel can be created before an agent connects. The full token is captured only on creation or explicit rotation, is sensitive, and is stored in Terraform state. command and docker_command are the ready-to-run agent commands the Obot UI shows; they contain the token and follow its lifecycle. Import adopts the definition without changing credentials and leaves token null. Match existing metadata and keep token_rotation_version at 0 for adoption. See the tunnel guide ../guides/mcp-tunnels.md for import, secret-manager publication, rotation, and recovery.
 ---
 
 # obot_mcp_tunnel (Resource)
 
-Manages an MCP tunnel definition. Requires an Obot Admin or Owner. The tunnel can be created before an agent connects. The full token is captured only on creation or explicit rotation, is sensitive, and is stored in Terraform state. Import adopts the definition without changing credentials and leaves `token` null. Match existing metadata and keep `token_rotation_version` at 0 for adoption. See the [tunnel guide](../guides/mcp-tunnels.md) for import, secret-manager publication, rotation, and recovery.
+Manages an MCP tunnel definition. Requires an Obot Admin or Owner. The tunnel can be created before an agent connects. The full token is captured only on creation or explicit rotation, is sensitive, and is stored in Terraform state. `command` and `docker_command` are the ready-to-run agent commands the Obot UI shows; they contain the token and follow its lifecycle. Import adopts the definition without changing credentials and leaves `token` null. Match existing metadata and keep `token_rotation_version` at 0 for adoption. See the [tunnel guide](../guides/mcp-tunnels.md) for import, secret-manager publication, rotation, and recovery.
 
 ## Example Usage
 
@@ -38,6 +38,8 @@ resource "obot_mcp_tunnel" "customer" {
 
 ### Read-Only
 
+- `command` (String, Sensitive) Command that connects an agent with the Obot CLI, as shown by the Obot UI: `obot tunnel --obot-base-url <API URL> --token <token>`. The URL is the provider's `base_url` normalized to end in `/api`. Contains the complete `token`, so it is sensitive and stored in state. Set with `token` on creation or rotation, rebuilt on refresh when `base_url` changes, and null whenever `token` is null.
+- `docker_command` (String, Sensitive) Command that connects an agent using the Obot container image, as shown by the Obot UI: `docker run --rm ghcr.io/obot-platform/obot:<tag> tunnel --obot-base-url <API URL> --token <token>`. The tag is the Obot server version without build metadata, or `main` for development builds or when the version cannot be read. It is recorded when the token is captured, so upgrading Obot does not change it until the next rotation, or until a refresh after `base_url` changes rebuilds both commands. Contains the complete `token`, so it is sensitive and stored in state. Null whenever `token` is null.
 - `id` (String) The generated Obot tunnel ID, used by remote MCP catalog entries and import.
 - `token` (String, Sensitive) Complete tunnel bearer token, available after creation or explicit rotation. Null after import or an external rotation. Never populated from a preview. Protect Terraform state; sensitive values are still stored there.
 - `token_preview` (String) Non-secret shortened preview of the current token. It cannot authenticate an agent.

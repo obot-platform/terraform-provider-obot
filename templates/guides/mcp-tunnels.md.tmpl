@@ -54,10 +54,62 @@ export OBOT_TUNNEL_TOKEN="$(aws secretsmanager get-secret-value \
 obot tunnel
 ```
 
-Use the tunnel's generated `id` in a remote MCP catalog entry's
-`remoteConfig.tunnelName`. Its `fixedURL` or `hostname` must match
-`allowed_urls`. Catalog-entry management is not implemented by this provider
-yet; configure the reference through Obot's UI or API.
+For a quick start or a host where you run Terraform yourself, the resource
+also provides the ready-to-run commands the Obot UI shows after creation or
+rotation: `command` uses an installed Obot CLI, and `docker_command` runs the
+`ghcr.io/obot-platform/obot` image. Both contain the complete token, so they
+are sensitive, stored in state, and null whenever `token` is null, such as
+after import or an external rotation. They use the provider's `base_url`,
+normalized to end in `/api`, and refresh rebuilds them when `base_url`
+changes; if agents reach Obot at a different address, build the command from
+`token` instead.
+
+```terraform
+output "tunnel_command" {
+  value     = obot_mcp_tunnel.customer.docker_command
+  sensitive = true
+}
+```
+
+```shell
+terraform output -raw tunnel_command
+```
+
+The image tag is the Obot server version, without build metadata, when the
+token is captured. For development builds it is `main`, as in the Obot UI.
+When the provider cannot read the version it also uses `main`, and apply
+shows a warning. Refresh does not update
+the tag after an Obot upgrade; the next rotation does, as does a refresh after
+`base_url` changes, which rebuilds both commands. `terraform output -raw`
+prints the token, so do not run it in shared CI logs.
+
+`docker_command` runs the agent in a container, so `localhost` in it means the
+container. If the base URL or the MCP servers are on the Docker host, add
+networking flags such as `--network host` after `docker run`. The agent sends
+requests to MCP servers through any proxy set by `HTTP_PROXY` or `HTTPS_PROXY`
+in its environment; add private MCP hosts to `NO_PROXY` so it reaches them
+directly. An agent whose token was rotated keeps retrying until it is stopped.
+
+## Put the tunnel behind a catalog entry
+
+Users reach a tunneled MCP server through a remote catalog entry that names
+the tunnel. Obot does not accept tunnel references in entries synchronized from
+a catalog source, so create the entry with `obot_mcp_catalog_entry` and grant
+access to it with `obot_mcp_access_rule`:
+
+{{ tffile "examples/guides/tunnel-catalog-entry/main.tf" }}
+
+The entry's `fixed_url` or `hostname` is the address as the tunnel agent's
+network sees it, not as Obot would resolve it, because the agent makes the
+request. The tunnel's `allowed_urls` must allow it: Obot checks this when the
+entry is created or updated, so apply fails if the entry's URL is not allowed.
+A tunneled URL must be fixed; it cannot contain `${...}` references.
+
+Because the entry refers to the tunnel's `id`, Terraform creates the tunnel
+first and deletes it last. The entry can be created before an agent connects;
+users cannot reach the server until one does. While the entry exists, Obot
+rejects deleting the tunnel and rejects `allowed_urls` changes that would stop
+allowing the entry's URL. Change or delete the entry first.
 
 ## Import an existing definition
 
@@ -117,8 +169,8 @@ with a higher version unless you intend another rotation.
 
 ## State and deletion
 
-`token` is sensitive so normal Terraform output redacts it, but the complete
-token remains in state and saved plans. Use a protected backend with access
+`token`, `command`, and `docker_command` are sensitive so normal Terraform
+output redacts them, but the complete token remains in state and saved plans. Use a protected backend with access
 controls and encryption. Do not commit state or print tokens in CI logs.
 Writing to AWS or Vault does not remove the Obot token from Terraform state.
 Losing state loses this copy of the one-time token.

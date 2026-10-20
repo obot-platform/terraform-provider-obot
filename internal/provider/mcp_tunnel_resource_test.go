@@ -82,10 +82,32 @@ func testAccTunnelDestroy(t *testing.T) resource.TestCheckFunc {
 	}
 }
 
+// testAccTunnelCommandsMatch checks that the agent commands carry the token in
+// state, and are null exactly when it is.
+func testAccTunnelCommandsMatch(baseURL string, values map[string]any) error {
+	token, ok := values["token"].(string)
+	if !ok {
+		if values["command"] != nil || values["docker_command"] != nil {
+			return fmt.Errorf("tunnel commands are set without a token")
+		}
+		return nil
+	}
+	args := "tunnel --obot-base-url " + baseURL + " --token " + token
+	dockerCommand, _ := values["docker_command"].(string)
+	if values["command"] != "obot "+args ||
+		!regexp.MustCompile(`^docker run --rm ghcr\.io/obot-platform/obot:[^ ]+ `).MatchString(dockerCommand) ||
+		!strings.HasSuffix(dockerCommand, " "+args) {
+		return fmt.Errorf("tunnel commands do not match the token in state")
+	}
+	return nil
+}
+
 func testAccTunnelChecks(t *testing.T, extra func(context.Context, map[string]any) error) []statecheck.StateCheck {
 	t.Helper()
 	return []statecheck.StateCheck{
 		statecheck.ExpectSensitiveValue(tunnelAddress, tfjsonpath.New("token")),
+		statecheck.ExpectSensitiveValue(tunnelAddress, tfjsonpath.New("command")),
+		statecheck.ExpectSensitiveValue(tunnelAddress, tfjsonpath.New("docker_command")),
 		tunnelStateCheck{address: tunnelAddress, check: func(ctx context.Context, values map[string]any) error {
 			id, _ := values["id"].(string)
 			remote, err := testAccTunnelClient(t).GetTunnel(ctx, id)
@@ -120,6 +142,9 @@ func testAccTunnelChecks(t *testing.T, extra func(context.Context, map[string]an
 				if err != nil || preview != remote.Token {
 					return fmt.Errorf("state does not contain the current complete token")
 				}
+			}
+			if err := testAccTunnelCommandsMatch(testAccTunnelClient(t).BaseURL(), values); err != nil {
+				return err
 			}
 			if extra != nil {
 				return extra(ctx, values)
@@ -157,10 +182,14 @@ func TestAccMCPTunnel_lifecycle(t *testing.T) {
 				return nil
 			})},
 			{Config: updated, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
-			{ResourceName: tunnelAddress, ImportState: true, ImportStateKind: resource.ImportCommandWithID, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"token"}},
+			{ResourceName: tunnelAddress, ImportState: true, ImportStateKind: resource.ImportCommandWithID, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"token", "command", "docker_command"}},
 			{ResourceName: tunnelAddress, ImportState: true, ImportStateKind: resource.ImportBlockWithID},
 			{ResourceName: tunnelAddress, ImportState: true, ImportStateKind: resource.ImportBlockWithResourceIdentity},
-			{Config: rotated, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectUnknownValue(tunnelAddress, tfjsonpath.New("token"))}}, ConfigStateChecks: testAccTunnelChecks(t, func(_ context.Context, v map[string]any) error {
+			{Config: rotated, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+				plancheck.ExpectUnknownValue(tunnelAddress, tfjsonpath.New("token")),
+				plancheck.ExpectUnknownValue(tunnelAddress, tfjsonpath.New("command")),
+				plancheck.ExpectUnknownValue(tunnelAddress, tfjsonpath.New("docker_command")),
+			}}, ConfigStateChecks: testAccTunnelChecks(t, func(_ context.Context, v map[string]any) error {
 				if v["id"] != id || v["token"] == token {
 					return fmt.Errorf("rotation did not change only the credential")
 				}
@@ -173,8 +202,8 @@ func TestAccMCPTunnel_lifecycle(t *testing.T) {
 				}
 				return nil
 			})},
-			{ResourceName: tunnelAddress, ImportState: true, ImportStateKind: resource.ImportCommandWithID, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"token", "token_rotation_version"}, ImportStateCheck: func(states []*terraform.InstanceState) error {
-				if len(states) != 1 || states[0].Attributes["token"] != "" || states[0].Attributes["token_rotation_version"] != "0" {
+			{ResourceName: tunnelAddress, ImportState: true, ImportStateKind: resource.ImportCommandWithID, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"token", "token_rotation_version", "command", "docker_command"}, ImportStateCheck: func(states []*terraform.InstanceState) error {
+				if len(states) != 1 || states[0].Attributes["token"] != "" || states[0].Attributes["command"] != "" || states[0].Attributes["docker_command"] != "" || states[0].Attributes["token_rotation_version"] != "0" {
 					return fmt.Errorf("CLI import did not leave the token unavailable and rotation version at zero")
 				}
 				return nil

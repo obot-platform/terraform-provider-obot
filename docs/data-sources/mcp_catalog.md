@@ -3,12 +3,12 @@
 page_title: "obot_mcp_catalog Data Source - obot"
 subcategory: ""
 description: |-
-  Reads an MCP catalog's sources, synchronization status, and entry inventory. Use to discover configuration before import. Reading never refreshes or changes the catalog. Git-owned entry definitions remain in Git; inline catalog credentials and server configurations are not exposed. Use an Admin, Owner, or Auditor token: Obot limits other tokens to the entries their access policies allow.
+  Reads an MCP catalog's sources, synchronization status, and entry inventory. Use to discover configuration before import. Reading never refreshes or changes the catalog. Git-owned entry definitions remain in Git; inline catalog credentials and server configurations are not exposed. A source URL added in Obot with embedded credentials, such as https://<token>@github.com/..., appears with its userinfo removed and its query values replaced by REDACTED, since either can carry a working credential, and they are redacted from sync errors; use obot_git_credential for private sources instead. A URL changed this way, including one with a harmless query such as ?ref=main, is not the source's real URL: it cannot be used to import an obot_mcp_catalog_source or to look up that source's url in these maps. Use an Admin, Owner, or Auditor token: Obot limits other tokens to the entries their access policies allow.
 ---
 
 # obot_mcp_catalog (Data Source)
 
-Reads an MCP catalog's sources, synchronization status, and entry inventory. Use to discover configuration before import. Reading never refreshes or changes the catalog. Git-owned entry definitions remain in Git; inline catalog credentials and server configurations are not exposed. Use an Admin, Owner, or Auditor token: Obot limits other tokens to the entries their access policies allow.
+Reads an MCP catalog's sources, synchronization status, and entry inventory. Use to discover configuration before import. Reading never refreshes or changes the catalog. Git-owned entry definitions remain in Git; inline catalog credentials and server configurations are not exposed. A source URL added in Obot with embedded credentials, such as `https://<token>@github.com/...`, appears with its userinfo removed and its query values replaced by `REDACTED`, since either can carry a working credential, and they are redacted from sync errors; use `obot_git_credential` for private sources instead. A URL changed this way, including one with a harmless query such as `?ref=main`, is not the source's real URL: it cannot be used to import an `obot_mcp_catalog_source` or to look up that source's `url` in these maps. Use an Admin, Owner, or Auditor token: Obot limits other tokens to the entries their access policies allow.
 
 ## Example Usage
 
@@ -31,9 +31,9 @@ data "obot_mcp_catalog" "default" {
 - `entries` (Attributes List) Current catalog entries sorted by ID. Source-managed entries have a nonempty source URL; API-created entries have an empty one. This is the current inventory and does not trigger synchronization. (see [below for nested schema](#nestedatt--entries))
 - `is_syncing` (Boolean) Whether synchronization is running or queued.
 - `last_synced` (String) Timestamp of the last completed synchronization, or an empty string if none has completed.
-- `source_git_credential_ids` (Map of String) Existing Git credential IDs keyed by source URL; contains no token values.
-- `sources` (Set of String) Current catalog source URLs.
-- `sync_errors` (Map of String) Last synchronization errors keyed by source URL.
+- `source_git_credential_ids` (Map of String) Existing Git credential IDs keyed by source URL, with userinfo removed and query values redacted; contains no token values. Sources that differ only in credentials share a key, and their distinct IDs are joined with commas.
+- `sources` (Set of String) Current catalog source URLs, with userinfo removed and query values redacted. Sources that differ only in credentials appear once.
+- `sync_errors` (Map of String) Last synchronization errors keyed by source URL, with userinfo removed and query values redacted from keys, and those credentials redacted from messages. Sources that differ only in credentials share a key, and their distinct messages are joined with newlines.
 
 <a id="nestedatt--entries"></a>
 ### Nested Schema for `entries`
@@ -42,4 +42,4 @@ Read-Only:
 
 - `id` (String) The catalog entry identifier.
 - `name` (String) The catalog entry's name.
-- `source_url` (String) The owning source URL, empty for API-created entries.
+- `source_url` (String) The owning source URL, with userinfo removed and query values redacted, empty for API-created entries.

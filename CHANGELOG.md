@@ -12,6 +12,10 @@ FEATURES:
   captures the one-time token on create, rotates only when
   `token_rotation_version` changes, detects external rotation, and imports by
   ID or resource identity without rotating.
+- `obot_mcp_tunnel` exports sensitive `command` and `docker_command`
+  attributes, the ready-to-run `obot tunnel` commands the Obot UI shows. They
+  are set with the token on create and rotation, and the Docker image tag
+  follows the Obot server version, falling back to `main`.
 - **New resource:** `obot_mcp_catalog_source` manages one default catalog
   source the way the Obot UI does, leaving other sources unchanged. It waits
   for the catalog to sync, reports only its own sync errors, and imports by
@@ -23,6 +27,12 @@ FEATURES:
 - **New resource:** `obot_mcp_access_rule` manages one MCP access policy,
   including the shipped Everything policy, and imports by rule ID or resource
   identity.
+- **New resource:** `obot_mcp_catalog_entry` manages a remote MCP server entry
+  created directly in the default catalog, including one reached through an
+  MCP tunnel, which catalog sources cannot define. Fixed header values are
+  write-only (`value_wo`, Terraform 1.11+) and are resent only when
+  `value_wo_version` changes. Entries synchronized from a catalog source are
+  rejected. It imports by ID or resource identity.
 - **New data sources:** `obot_current_user`, `obot_current_auth_provider`,
   `obot_mcp_tunnel`, `obot_mcp_tunnels`, `obot_mcp_catalog`,
   `obot_git_credential` (by ID or unique display name), `obot_git_credentials`,

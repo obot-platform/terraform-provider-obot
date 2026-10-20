@@ -44,6 +44,8 @@ type tunnelResourceModel struct {
 	Token                types.String `tfsdk:"token"`
 	TokenPreview         types.String `tfsdk:"token_preview"`
 	TokenRotationVersion types.Int64  `tfsdk:"token_rotation_version"`
+	Command              types.String `tfsdk:"command"`
+	DockerCommand        types.String `tfsdk:"docker_command"`
 }
 
 type tunnelIdentityModel struct {
@@ -62,6 +64,7 @@ func (r *mcpTunnelResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Manages an MCP tunnel definition. Requires an Obot Admin or Owner. The tunnel can be created before an agent connects. " +
 			"The full token is captured only on creation or explicit rotation, is sensitive, and is stored in Terraform state. " +
+			"`command` and `docker_command` are the ready-to-run agent commands the Obot UI shows; they contain the token and follow its lifecycle. " +
 			"Import adopts the definition without changing credentials and leaves `token` null. " +
 			"Match existing metadata and keep `token_rotation_version` at 0 for adoption. " +
 			"See the [tunnel guide](../guides/mcp-tunnels.md) for import, secret-manager publication, rotation, and recovery.",
@@ -104,6 +107,23 @@ func (r *mcpTunnelResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 				MarkdownDescription: "Complete tunnel bearer token, available after creation or explicit rotation. " +
 					"Null after import or an external rotation. Never populated from a preview. " +
 					"Protect Terraform state; sensitive values are still stored there.",
+			},
+			"command": schema.StringAttribute{
+				Computed:  true,
+				Sensitive: true,
+				MarkdownDescription: "Command that connects an agent with the Obot CLI, as shown by the Obot UI: " +
+					"`obot tunnel --obot-base-url <API URL> --token <token>`. The URL is the provider's `base_url` normalized to end in `/api`. " +
+					"Contains the complete `token`, so it is sensitive and stored in state. " +
+					"Set with `token` on creation or rotation, rebuilt on refresh when `base_url` changes, and null whenever `token` is null.",
+			},
+			"docker_command": schema.StringAttribute{
+				Computed:  true,
+				Sensitive: true,
+				MarkdownDescription: "Command that connects an agent using the Obot container image, as shown by the Obot UI: " +
+					"`docker run --rm ghcr.io/obot-platform/obot:<tag> tunnel --obot-base-url <API URL> --token <token>`. " +
+					"The tag is the Obot server version without build metadata, or `main` for development builds or when the version cannot be read. " +
+					"It is recorded when the token is captured, so upgrading Obot does not change it until the next rotation, or until a refresh after `base_url` changes rebuilds both commands. " +
+					"Contains the complete `token`, so it is sensitive and stored in state. Null whenever `token` is null.",
 			},
 			"token_preview": schema.StringAttribute{
 				Computed:            true,
@@ -178,6 +198,20 @@ func (m *tunnelResourceModel) captureToken(tunnel *client.Tunnel) {
 	m.TokenPreview = types.StringValue(preview)
 }
 
+// tokenCommandsStale reports whether command values must be derived again:
+// they are always cleared with the token, filled in when missing, and
+// rebuilt when the provider's base URL no longer matches the one in them.
+func (m tunnelResourceModel) tokenCommandsStale(baseURL string) bool {
+	if m.Token.IsNull() || m.Token.IsUnknown() {
+		return !m.Command.IsNull() || !m.DockerCommand.IsNull()
+	}
+	if m.Command.IsNull() || m.Command.IsUnknown() || m.DockerCommand.IsNull() || m.DockerCommand.IsUnknown() {
+		return true
+	}
+	command, _ := tunnelCommands(baseURL, fallbackTunnelImageTag, m.Token.ValueString())
+	return m.Command.ValueString() != command
+}
+
 // refreshToken records the server's preview and drops a cached token that no
 // longer matches it, so a stale credential is never exported.
 func (m *tunnelResourceModel) refreshToken(preview string, diagnostics *diag.Diagnostics) {
@@ -225,9 +259,13 @@ func (r *mcpTunnelResource) ModifyPlan(ctx context.Context, req resource.ModifyP
 	if plan.TokenRotationVersion.IsUnknown() || !plan.TokenRotationVersion.Equal(state.TokenRotationVersion) {
 		plan.Token = types.StringUnknown()
 		plan.TokenPreview = types.StringUnknown()
+		plan.Command = types.StringUnknown()
+		plan.DockerCommand = types.StringUnknown()
 	} else {
 		plan.Token = state.Token
 		plan.TokenPreview = state.TokenPreview
+		plan.Command = state.Command
+		plan.DockerCommand = state.DockerCommand
 	}
 	resp.Diagnostics.Append(resp.Plan.Set(ctx, &plan)...)
 }
@@ -245,6 +283,7 @@ func (r *mcpTunnelResource) Create(ctx context.Context, req resource.CreateReque
 		// so Terraform taints it rather than losing track of the object.
 		data.setMetadata(ctx, tunnel, &resp.Diagnostics)
 		data.captureToken(tunnel)
+		data.setCommands(ctx, r.client, &resp.Diagnostics)
 		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 		setTunnelIdentity(ctx, resp.Identity, data.ID, &resp.Diagnostics)
 	}
@@ -270,6 +309,12 @@ func (r *mcpTunnelResource) Read(ctx context.Context, req resource.ReadRequest, 
 	}
 	data.setMetadata(ctx, tunnel, &resp.Diagnostics)
 	data.refreshToken(tunnel.Token, &resp.Diagnostics)
+	// Commands keep the image tag captured with the token, so a server
+	// upgrade does not change docker_command, but follow base_url, and are
+	// cleared with a stale token.
+	if data.tokenCommandsStale(r.client.BaseURL()) {
+		data.setCommands(ctx, r.client, &resp.Diagnostics)
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 	setTunnelIdentity(ctx, resp.Identity, data.ID, &resp.Diagnostics)
 }
@@ -312,6 +357,7 @@ func (r *mcpTunnelResource) Update(ctx context.Context, req resource.UpdateReque
 		// A rotation response always revokes the previous token, so record
 		// the outcome even when the new secret was unusable.
 		state.captureToken(tunnel)
+		state.setCommands(ctx, r.client, &resp.Diagnostics)
 		state.TokenRotationVersion = plan.TokenRotationVersion
 		if err != nil {
 			resp.Diagnostics.AddError("Error Rotating MCP Tunnel Token", err.Error())
@@ -346,6 +392,8 @@ func (r *mcpTunnelResource) ImportState(ctx context.Context, req resource.Import
 	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), id)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("token"), types.StringNull())...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("command"), types.StringNull())...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("docker_command"), types.StringNull())...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("token_rotation_version"), int64(0))...)
 	setTunnelIdentity(ctx, resp.Identity, types.StringValue(id), &resp.Diagnostics)
 	resp.Diagnostics.AddWarning("Tunnel Token Unavailable After Import",
