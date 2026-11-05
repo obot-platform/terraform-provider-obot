@@ -76,11 +76,41 @@ def valid_name(value):
     return value
 
 
-def source(ref, refresh=False, directory=None):
+# How far back main is searched for the commit a published image was built
+# from. The main image is rebuilt continuously, so it is normally the tip.
+REVISION_SEARCH_DEPTH = 300
+
+
+def source(ref, refresh=False, directory=None, revision=None):
+    """Return a source checkout and its commit.
+
+    revision pins a managed main checkout to the commit a server image was
+    built from, which may trail or lead the branch tip. An explicit directory
+    is never moved; a mismatch is only reported.
+    """
     directory = directory or os.environ.get("OBOT_SOURCE_DIR")
     if directory:
         path = Path(directory).expanduser().resolve()
         path = Path(run(["git", "-C", path, "rev-parse", "--show-toplevel"], capture=True))
+        if revision:
+            head = run(["git", "-C", path, "rev-parse", "HEAD"], capture=True)
+            if not head.startswith(revision):
+                note(f"Warning: {path} is at {head[:12]}, but the server image was built from {revision}")
+    elif revision and ref == "main":
+        path = CACHE / "sources" / ref
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            run(["git", "clone", "--depth", "1", "--branch", ref, REPO, path])
+        if not run(["git", "-C", path, "rev-parse", "HEAD"], capture=True).startswith(revision):
+            if run(["git", "-C", path, "status", "--porcelain"], capture=True):
+                raise SetupError(f"Source checkout has local changes: {path}")
+            run(["git", "-C", path, "fetch", "--depth", str(REVISION_SEARCH_DEPTH), "origin", "refs/heads/main"])
+            found = subprocess.run(["git", "-C", str(path), "rev-parse", "--verify", "--quiet",
+                                    f"{revision}^{{commit}}"], text=True, capture_output=True)
+            if found.returncode:
+                raise SetupError(f"Image revision {revision} is not among the last "
+                                 f"{REVISION_SEARCH_DEPTH} main commits")
+            run(["git", "-C", path, "checkout", "--detach", found.stdout.strip()])
     else:
         path = CACHE / "sources" / ref
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,7 +147,7 @@ def release_binary(archive, name, data):
     raise SetupError(f"Release archive must contain one regular {data} file")
 
 
-def cli(ref, refresh=False, build=False, directory=None):
+def cli(ref, refresh=False, build=False, directory=None, revision=None):
     directory = directory or os.environ.get("OBOT_SOURCE_DIR")
     system = platform.system().lower()
     arch = {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64",
@@ -126,7 +156,7 @@ def cli(ref, refresh=False, build=False, directory=None):
         raise SetupError(f"Unsupported CLI platform: {system}/{platform.machine()}")
     filename = "obot.exe" if system == "windows" else "obot"
     if ref == "main" or build or directory:
-        path, commit = source(ref, refresh, directory)
+        path, commit = source(ref, refresh, directory, revision)
         dirty = bool(run(["git", "-C", path, "status", "--porcelain"], capture=True))
         # Never reuse a cached binary for an edited developer checkout.
         key = f"{commit}-dirty-{uuid.uuid4().hex[:8]}" if dirty else commit
@@ -286,11 +316,106 @@ def wait_for(state, timeout):
     raise SetupError(f"Instance {state['name']} not healthy after {timeout}s: {last}")
 
 
-def start(name, ref, port=0, timeout=180, image=None, email=EMAIL, docker_socket=None, catalog_test=None):
+def image_revision(version):
+    """Extract the source commit from `obot version`, e.g. v0.27.0+a6070110."""
+    match = re.search(r"\+([0-9a-f]{7,40})\b", version or "")
+    return match.group(1) if match else None
+
+
+def prepare(ref, image=None):
+    """Pull the server image once and identify exactly what it contains.
+
+    Every instance of a run starts from the returned image ID, so a tag that
+    moves mid-run cannot give instances different servers.
+    """
+    custom_image = image is not None
+    image = image or f"{IMAGE}:{ref}"
+    if not custom_image or inspect("image", image) is None:
+        run(["docker", "pull", image])
+    details = json.loads(run(["docker", "image", "inspect", image], capture=True))[0]
+    result = subprocess.run(["docker", "run", "--rm", "--network", "none", "--entrypoint", "obot",
+                             details["Id"], "version"], text=True, capture_output=True, timeout=120)
+    version = next((line.split(":", 1)[1].strip() for line in result.stdout.splitlines()
+                    if line.startswith("Version:")), "")
+    prepared = {"ref": ref, "image": image, "image_id": details["Id"],
+                "image_digests": details.get("RepoDigests", []),
+                "image_created": details.get("Created", ""), "server_version": version,
+                "server_revision": image_revision(version)}
+    # Main's image and source publish independently; build the CLI from the
+    # commit the image reports so a skew between them cannot fail the run.
+    prepared["cli_revision"] = prepared["server_revision"] if ref == "main" else None
+    note(f"{ref}: image {details['Id'][:19]} reports {version or 'no version'}")
+    return prepared
+
+
+def docker_socket_path(docker_socket=None):
     default_socket = "/var/run/docker.sock"
     if Path("/etc/discobox/sandbox.json").is_file() and os.environ.get("GITHUB_ACTIONS") != "true":
         default_socket = "/run/docker.sock"
-    docker_socket = docker_socket or os.environ.get("OBOT_TEST_DOCKER_SOCKET", default_socket)
+    return docker_socket or os.environ.get("OBOT_TEST_DOCKER_SOCKET", default_socket)
+
+
+def run_container(state, setup_token, docker_socket, catalog_test=None):
+    """Start the instance's container on its volume from state["image_id"]."""
+    environment = os.environ.copy()
+    environment["OBOT_SERVER_LOCAL_AUTH_INITIAL_OWNER_SETUP_TOKEN"] = setup_token
+    port = urllib.parse.urlsplit(state["url"]).port
+    command = ["docker", "run", "-d", "--name", state["container"],
+               "--label", f"{LABEL}={PROJECT}",
+               "-p", f"127.0.0.1:{port}:8080",
+               "-v", f"{state['volume']}:/data",
+               "-e", "OBOT_SERVER_ENABLE_AUTHENTICATION=true",
+               "-e", f"OBOT_SERVER_HOSTNAME={state['url']}",
+               "-e", f"OBOT_SERVER_LOCAL_AUTH_INITIAL_OWNER_EMAIL={state['email']}",
+               "-e", "OBOT_SERVER_LOCAL_AUTH_INITIAL_OWNER_SETUP_TOKEN",
+               "-e", "OBOT_SERVER_DEFAULT_MCPCATALOG_PATH=",
+               "-e", "OBOT_SERVER_DEFAULT_SYSTEM_MCPCATALOG_PATH=",
+               "-e", "OBOT_SERVER_DISABLE_UPDATE_CHECK=true"]
+    if docker_socket:
+        command.extend(["-v", f"{docker_socket}:/var/run/docker.sock"])
+    if catalog_test:
+        command.extend([
+            "--add-host", "host.docker.internal:host-gateway",
+            "-v", f"{catalog_test['ca_bundle']}:/etc/obot-test-catalog-ca.pem:ro",
+            "-e", "SSL_CERT_FILE=/etc/obot-test-catalog-ca.pem",
+            "-e", "OBOT_SERVER_DISALLOW_PRIVATE_IPMCP=false",
+            "-e", f"OBOT_SERVER_DEFAULT_MCPCATALOG_PATH={catalog_test['initial']}",
+            "-e", "NO_PROXY=localhost,127.0.0.1,::1,host.docker.internal",
+            "-e", "no_proxy=localhost,127.0.0.1,::1,host.docker.internal",
+        ])
+    command.append(state["image_id"])
+    run(command, env=environment)
+
+
+def wait_for_catalog(state, timeout):
+    # Controllers create the default catalog independently of the HTTP listener.
+    api, _ = session(state)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            api.request("/api/mcp-catalogs/default")
+            return
+        except SetupError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(1)
+
+
+def record_provenance(state, event="start"):
+    """Append what a run actually tested to OBOT_TEST_PROVENANCE, if set."""
+    path = os.environ.get("OBOT_TEST_PROVENANCE")
+    if not path:
+        return
+    keys = ("name", "ref", "image", "image_id", "image_digests", "image_created",
+            "server_version", "server_revision", "cli_revision", "upgraded_from", "postgres_migration")
+    record = {"event": event, **{key: state.get(key) for key in keys}}
+    with open(path, "a") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
+def start(name, ref, port=0, timeout=180, image=None, email=EMAIL, docker_socket=None, catalog_test=None,
+          prepared=None):
+    docker_socket = docker_socket_path(docker_socket)
     if not 0 <= port <= 65535 or timeout <= 0:
         raise SetupError("port must be 0-65535 and timeout must be positive")
     directory = state_path(name).parent
@@ -304,46 +429,14 @@ def start(name, ref, port=0, timeout=180, image=None, email=EMAIL, docker_socket
              "volume": container + "-data", "email": email, "status": "starting"}
     save(state)
     try:
-        custom_image = image is not None
-        image = image or f"{IMAGE}:{ref}"
-        if not custom_image or inspect("image", image) is None:
-            run(["docker", "pull", image])
-        details = json.loads(run(["docker", "image", "inspect", image], capture=True))[0]
-        state["image"] = image
-        state["image_id"] = details["Id"]
-        state["image_digests"] = details.get("RepoDigests", [])
+        prepared = prepared or prepare(ref, image)
+        state.update({key: value for key, value in prepared.items() if key != "ref"})
         port = port or free_port()
         state["url"] = f"http://127.0.0.1:{port}"
         save(state)
         run(["docker", "volume", "create", "--label", f"{LABEL}={PROJECT}", state["volume"]])
         setup_token = uuid.uuid4().hex + uuid.uuid4().hex
-        environment = os.environ.copy()
-        environment["OBOT_SERVER_LOCAL_AUTH_INITIAL_OWNER_SETUP_TOKEN"] = setup_token
-        command = ["docker", "run", "-d", "--name", container,
-                   "--label", f"{LABEL}={PROJECT}",
-                   "-p", f"127.0.0.1:{port}:8080",
-                   "-v", f"{state['volume']}:/data",
-                   "-e", "OBOT_SERVER_ENABLE_AUTHENTICATION=true",
-                   "-e", f"OBOT_SERVER_HOSTNAME={state['url']}",
-                   "-e", f"OBOT_SERVER_LOCAL_AUTH_INITIAL_OWNER_EMAIL={email}",
-                   "-e", "OBOT_SERVER_LOCAL_AUTH_INITIAL_OWNER_SETUP_TOKEN",
-                   "-e", "OBOT_SERVER_DEFAULT_MCPCATALOG_PATH=",
-                   "-e", "OBOT_SERVER_DEFAULT_SYSTEM_MCPCATALOG_PATH=",
-                   "-e", "OBOT_SERVER_DISABLE_UPDATE_CHECK=true"]
-        if docker_socket:
-            command.extend(["-v", f"{docker_socket}:/var/run/docker.sock"])
-        if catalog_test:
-            command.extend([
-                "--add-host", "host.docker.internal:host-gateway",
-                "-v", f"{catalog_test['ca_bundle']}:/etc/obot-test-catalog-ca.pem:ro",
-                "-e", "SSL_CERT_FILE=/etc/obot-test-catalog-ca.pem",
-                "-e", "OBOT_SERVER_DISALLOW_PRIVATE_IPMCP=false",
-                "-e", f"OBOT_SERVER_DEFAULT_MCPCATALOG_PATH={catalog_test['initial']}",
-                "-e", "NO_PROXY=localhost,127.0.0.1,::1,host.docker.internal",
-                "-e", "no_proxy=localhost,127.0.0.1,::1,host.docker.internal",
-            ])
-        command.append(state["image_id"])
-        run(command, env=environment)
+        run_container(state, setup_token, docker_socket, catalog_test)
         wait_for(state, timeout)
         api = API(state["url"])
         api.request("/api/local-auth/activate", {"setupToken": setup_token})
@@ -351,18 +444,10 @@ def start(name, ref, port=0, timeout=180, image=None, email=EMAIL, docker_socket
         identity = api.request("/api/me")
         if identity.get("email") != email:
             raise SetupError("Initial local owner identity did not match")
-        # Controllers create this independently of the HTTP listener.
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                api.request("/api/mcp-catalogs/default")
-                break
-            except SetupError:
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(1)
+        wait_for_catalog(state, timeout)
         state["status"] = "ready"
         save(state)
+        record_provenance(state)
         note(f"{name}: ready at {state['url']} ({ref}, local owner {email})")
         return state
     except BaseException:
@@ -375,12 +460,126 @@ def start(name, ref, port=0, timeout=180, image=None, email=EMAIL, docker_socket
 
 def stop(name):
     state = load(name)
-    if owned("container", state["container"]):
-        run(["docker", "rm", "-f", state["container"]])
+    for container in (state["container"], state["container"] + "-pg"):
+        if owned("container", container):
+            run(["docker", "rm", "-f", container])
     if owned("volume", state["volume"]):
         run(["docker", "volume", "rm", state["volume"]])
     shutil.rmtree(state_path(name).parent)
     note(f"{name}: removed")
+
+
+def postgres_major(image_id, volume=None):
+    """PostgreSQL major version of an image's server, or of the cluster on a volume."""
+    if volume:
+        command = ["docker", "run", "--rm", "--network", "none", "-v", f"{volume}:/data",
+                   "--entrypoint", "sh", image_id, "-c", 'cat "$PGDATA/PG_VERSION" 2>/dev/null || true']
+    else:
+        command = ["docker", "run", "--rm", "--network", "none", "--entrypoint", "postgres",
+                   image_id, "--version"]
+    output = run(command, capture=True)
+    match = re.search(r"(\d+)", output.split("PostgreSQL)")[-1])
+    return match.group(1) if match else None
+
+
+def maintenance_postgres(state, image_id, environment, timeout):
+    """Run only PostgreSQL from an image on the instance volume, without a network."""
+    name = state["container"] + "-pg"
+    run(["docker", "run", "-d", "--name", name, "--label", f"{LABEL}={PROJECT}",
+         "--network", "none", "-v", f"{state['volume']}:/data",
+         "-e", "POSTGRES_USER", "-e", "POSTGRES_PASSWORD", "-e", "PGDATA",
+         "-e", "POSTGRES_DB=postgres", "--entrypoint", "/usr/bin/docker-entrypoint.sh",
+         image_id, "postgres", "-c", "listen_addresses="], env=environment)
+    deadline = time.monotonic() + timeout
+    # PID 1 distinguishes the final server from the entrypoint's temporary one.
+    ready = 'test "$(head -n 1 "$PGDATA/postmaster.pid" 2>/dev/null)" = 1 && pg_isready -q -U "$POSTGRES_USER" -d postgres'
+    while subprocess.run(["docker", "exec", name, "sh", "-c", ready], capture_output=True).returncode:
+        if time.monotonic() >= deadline:
+            raise SetupError(f"Maintenance PostgreSQL for {state['name']} did not become ready")
+        time.sleep(1)
+    return name
+
+
+def migrate_embedded_postgres(state, old_image_id, new_image_id, environment, old_major, timeout):
+    """Dump and restore the embedded database across a PostgreSQL major version.
+
+    Follows Obot's documented Docker procedure (docs/operations/
+    embedded-postgresql-upgrade): dump with the old image, move the old
+    cluster aside, initialize with the new image, restore, and allow only the
+    documented "role already exists" error.
+    """
+    user = environment["POSTGRES_USER"]
+    with tempfile.TemporaryDirectory(prefix="obot-pg-migration-") as directory:
+        dump = Path(directory) / "backup.sql"
+        name = maintenance_postgres(state, old_image_id, environment, timeout)
+        try:
+            with open(dump, "wb") as handle:
+                result = subprocess.run(["docker", "exec", name, "pg_dumpall", "-U", user,
+                                         "--quote-all-identifiers"], stdout=handle, stderr=subprocess.PIPE)
+            if result.returncode or dump.stat().st_size == 0:
+                raise SetupError("pg_dumpall of the embedded database failed")
+        finally:
+            run(["docker", "rm", "-f", name])
+        run(["docker", "run", "--rm", "--network", "none", "-v", f"{state['volume']}:/data",
+             "-e", "PGDATA", "--entrypoint", "sh", new_image_id, "-ec",
+             f'test "$(cat "$PGDATA/PG_VERSION")" = {old_major}; '
+             f'test ! -e "$PGDATA-{old_major}-backup"; mv "$PGDATA" "$PGDATA-{old_major}-backup"'],
+            env=environment)
+        name = maintenance_postgres(state, new_image_id, environment, timeout)
+        try:
+            with open(dump, "rb") as handle:
+                result = subprocess.run(["docker", "exec", "-i", name, "psql", "-X", "-U", user, "-d", "postgres",
+                                         "-v", "ON_ERROR_STOP=off", "-v", "VERBOSITY=terse"],
+                                        stdin=handle, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            errors = [line for line in result.stderr.decode(errors="replace").splitlines()
+                      if re.search(r"(ERROR|FATAL|PANIC):", line)]
+            if result.returncode or errors != [f'ERROR:  role "{user}" already exists']:
+                raise SetupError(f"Restoring the embedded database reported {len(errors)} unexpected errors")
+            run(["docker", "exec", name, "vacuumdb", "-U", user, "--all", "--analyze", "--quiet"])
+        finally:
+            run(["docker", "rm", "-f", name])
+
+
+def upgrade(state, prepared, timeout=180, docker_socket=None, catalog_test=None):
+    """Replace an instance's server with another image, keeping its data volume.
+
+    This is what an operator does to upgrade: the database, users, API keys,
+    and every object Terraform created survive and must still be readable.
+    """
+    if not owned("volume", state["volume"]):
+        raise SetupError(f"Instance {state['name']} has no data volume to upgrade")
+    container = owned("container", state["container"])
+    if not container:
+        raise SetupError(f"Instance {state['name']} has no container to upgrade")
+    database = {key: value for key, _, value in (entry.partition("=") for entry in container["Config"]["Env"])
+                if key in ("POSTGRES_USER", "POSTGRES_PASSWORD", "PGDATA")}
+    run(["docker", "stop", "--time", "60", state["container"]])
+    run(["docker", "rm", state["container"]])
+    old_major = postgres_major(prepared["image_id"], state["volume"])
+    new_major = postgres_major(prepared["image_id"])
+    if old_major and new_major and old_major != new_major:
+        if set(database) != {"POSTGRES_USER", "POSTGRES_PASSWORD", "PGDATA"}:
+            raise SetupError("Cannot migrate the embedded database: its settings are not in the container")
+        note(f"{state['name']}: migrating embedded PostgreSQL {old_major} to {new_major} "
+             "with Obot's documented dump and restore")
+        environment = os.environ.copy()
+        environment.update(database)
+        migrate_embedded_postgres(state, state["image_id"], prepared["image_id"], environment, old_major, timeout)
+        state["postgres_migration"] = f"{old_major}->{new_major}"
+    previous = {key: state.get(key) for key in ("ref", "server_version")}
+    state.update(prepared)
+    state["status"] = "upgrading"
+    state["upgraded_from"] = previous
+    save(state)
+    # The owner already exists, so this setup token is never accepted.
+    run_container(state, uuid.uuid4().hex + uuid.uuid4().hex, docker_socket_path(docker_socket), catalog_test)
+    wait_for(state, timeout)
+    wait_for_catalog(state, timeout)
+    state["status"] = "ready"
+    save(state)
+    record_provenance(state, "upgrade")
+    note(f"{state['name']}: upgraded from {previous['server_version']} to {state['server_version']}")
+    return state
 
 
 def logs(name):
@@ -391,8 +590,15 @@ def logs(name):
     result = subprocess.run(["docker", "logs", "--tail", "200", state["container"]],
                             text=True, capture_output=True)
     text = result.stdout + result.stderr
+    # Defaults baked into the published image, such as its embedded database
+    # password, are public; redacting them would erase common words like the
+    # product name from every line. Redact everything set at run time.
+    image = inspect("image", data.get("Image", "")) or {}
+    public = set((image.get("Config") or {}).get("Env") or [])
     for entry in data.get("Config", {}).get("Env", []):
         key, _, value = entry.partition("=")
+        if entry in public:
+            continue
         if value and any(word in key for word in ("TOKEN", "PASSWORD", "SECRET", "API_KEY")):
             text = text.replace(value, "[REDACTED]")
     text = re.sub(r"ok1-[A-Za-z0-9_-]+", "[REDACTED_API_KEY]", text)
@@ -415,7 +621,7 @@ def token(state, email=None):
     # without opening a browser or depending on a desktop OS keyring in CI.
     key = api.request("/api/api-keys", {
         "name": "Terraform tests " + uuid.uuid4().hex[:8], "canAccessAPI": True})
-    binary = cli(state["ref"])
+    binary = cli(state["ref"], revision=state.get("cli_revision"))
     environment = os.environ.copy()
     environment["OBOT_BASE_URL"] = state["url"] + "/api"
     environment["OBOT_TOKEN"] = key["key"]
@@ -455,7 +661,7 @@ def environment_for(states, email=None):
                         "OBOT_TEST_INSTANCES": json.dumps(records),
                         "TF_ACC": "1"})
     # CLI commands run with this environment use the matching cached CLI.
-    binary = cli(states[0]["ref"])
+    binary = cli(states[0]["ref"], revision=states[0].get("cli_revision"))
     environment["PATH"] = str(binary.parent) + os.pathsep + environment.get("PATH", "")
     return environment
 
@@ -537,14 +743,28 @@ def smoke(states):
 
 
 
+def build_provider(path):
+    """Compile this checkout's provider and write a Terraform CLI config that uses it.
+
+    Returns the CLI config path. Terraform then runs the real plugin binary,
+    exactly as a user's installation would, instead of the in-process harness.
+    """
+    binary_dir = path / "bin"
+    binary_dir.mkdir(parents=True, exist_ok=True)
+    binary_name = "terraform-provider-obot.exe" if os.name == "nt" else "terraform-provider-obot"
+    run(["go", "build", "-o", binary_dir / binary_name, "."], cwd=ROOT)
+    override = path / "dev.tfrc"
+    override.write_text("provider_installation {\n  dev_overrides {\n"
+                        '    "registry.terraform.io/obot-platform/obot" = ' +
+                        json.dumps(str(binary_dir)) + "\n  }\n  direct {}\n}\n")
+    return override
+
+
 def check_provider_aliases(states, records):
     """Exercise aliases with real plugin processes, outside the reattach harness."""
     with tempfile.TemporaryDirectory(prefix="obot-provider-aliases-") as directory:
         path = Path(directory)
-        binary_dir = path / "bin"
-        binary_dir.mkdir()
-        binary_name = "terraform-provider-obot.exe" if os.name == "nt" else "terraform-provider-obot"
-        run(["go", "build", "-o", binary_dir / binary_name, "."], cwd=ROOT)
+        override = build_provider(path)
         config = """
 terraform {
   required_providers {
@@ -587,10 +807,6 @@ output "second_email" {
         config = config.replace("FIRST_URL", json.dumps(records[0]["base_url"]))
         config = config.replace("SECOND_URL", json.dumps(records[1]["base_url"]))
         (path / "main.tf").write_text(config)
-        override = path / "dev.tfrc"
-        override.write_text("provider_installation {\n  dev_overrides {\n"
-                            '    "registry.terraform.io/obot-platform/obot" = ' +
-                            json.dumps(str(binary_dir)) + "\n  }\n  direct {}\n}\n")
         environment = os.environ.copy()
         environment.pop("TF_REATTACH_PROVIDERS", None)
         environment.update({
@@ -674,7 +890,7 @@ def main(argv=None):
         print(logs(args.name), end="")
     elif args.command == "env":
         state = load(args.name)
-        binary = cli(state["ref"])
+        binary = cli(state["ref"], revision=state.get("cli_revision"))
         print("export OBOT_BASE_URL=" + shlex.quote(state["url"] + "/api"))
         print("export PATH=" + shlex.quote(str(binary.parent)) + ':"$PATH"')
         print("unset OBOT_TOKEN")
@@ -697,12 +913,14 @@ def main(argv=None):
         fixtures = ExitStack()
         catalog_test = fixtures.enter_context(catalog_fixture.serve()) if args.command == "testacc" else None
         try:
-            cli(args.ref)
+            prepared = prepare(args.ref)
+            cli(args.ref, revision=prepared["cli_revision"])
             for index in range(args.instances):
                 name = f"test-{uuid.uuid4().hex[:8]}-{index}"
                 names.append(name)
                 email = EMAIL if index == 0 else f"test_obot_admin_{index + 1}@example.com"
-                states.append(start(name, args.ref, timeout=args.timeout, email=email, catalog_test=catalog_test))
+                states.append(start(name, args.ref, timeout=args.timeout, email=email,
+                                    catalog_test=catalog_test, prepared=prepared))
             if args.command == "smoke":
                 smoke(states)
             else:

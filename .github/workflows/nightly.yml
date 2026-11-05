@@ -1,0 +1,227 @@
+# Nightly compatibility of the provider with Obot main and every supported
+# release. Upstream Obot changes daily while this repository may not, so this
+# runs on a schedule rather than on pushes. See README, "Nightly compatibility
+# tests". No secrets are needed: Obot runs in Docker on the runner, and issues
+# are managed with the workflow's own GITHUB_TOKEN.
+name: Nightly Obot compatibility
+
+on:
+  schedule:
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+    inputs:
+      manage_issues:
+        description: Open, update, or close the nightly tracking issues from this run
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-obot-compatibility
+  cancel-in-progress: false
+
+env:
+  TERRAFORM_VERSION: '1.14.0'
+  # Building the main Obot CLI requires Go 1.27; the provider itself
+  # continues to support the Go version declared in go.mod.
+  GO_VERSION: '1.27.x'
+
+jobs:
+  plan:
+    name: Resolve Obot versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      refs: ${{ steps.versions.outputs.refs }}
+      upgrades: ${{ steps.versions.outputs.upgrades }}
+      provider_release: ${{ steps.versions.outputs.provider_release }}
+      warnings: ${{ steps.versions.outputs.warnings }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: versions
+        run: python3 scripts/obot_versions.py matrix --discover --provider-remote origin --github-output
+
+  acceptance:
+    name: Acceptance / Obot ${{ matrix.ref }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: ${{ fromJSON(needs.plan.outputs.refs) }}
+    env:
+      REF: ${{ matrix.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - name: Smoke and acceptance tests
+        run: >-
+          python3 scripts/nightly.py leg --kind acceptance --name "acceptance / $REF" --ref "$REF" --out results --
+          sh -c 'make test-smoke OBOT_REF="$REF" OBOT_INSTANCES=2 && make test-acceptance-fresh OBOT_REF="$REF" OBOT_INSTANCES=2'
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-leg-acceptance-${{ matrix.ref }}
+          path: |
+            results/
+            .obot/logs/
+          if-no-files-found: ignore
+
+  e2e:
+    name: End to end / Obot ${{ matrix.ref }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: ${{ fromJSON(needs.plan.outputs.refs) }}
+    env:
+      REF: ${{ matrix.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - name: Compiled provider scenario
+        run: >-
+          python3 scripts/nightly.py leg --kind e2e --name "e2e / $REF" --ref "$REF" --out results --
+          make test-e2e OBOT_REF="$REF"
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-leg-e2e-${{ matrix.ref }}
+          path: |
+            results/
+            .obot/logs/
+          if-no-files-found: ignore
+
+  upgrade:
+    name: Upgrade / Obot ${{ matrix.from }} to ${{ matrix.to }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.upgrades) }}
+    env:
+      FROM: ${{ matrix.from }}
+      TO: ${{ matrix.to }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - name: Upgrade Obot under Terraform-managed objects
+        run: >-
+          python3 scripts/nightly.py leg --kind upgrade --name "upgrade / $FROM → $TO" --ref "$FROM" --ref "$TO" --out results --
+          make test-upgrade UPGRADE_FROM="$FROM" UPGRADE_TO="$TO"
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-leg-upgrade-${{ matrix.from }}-to-${{ matrix.to }}
+          path: |
+            results/
+            .obot/logs/
+          if-no-files-found: ignore
+
+  # Users run the released provider, not main. Test the newest release tag
+  # with its own acceptance suite; skipped until the first release exists.
+  released-provider:
+    name: Released provider ${{ needs.plan.outputs.provider_release }} / Obot ${{ matrix.ref }}
+    needs: plan
+    if: needs.plan.outputs.provider_release != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: ${{ fromJSON(needs.plan.outputs.refs) }}
+    env:
+      REF: ${{ matrix.ref }}
+      RELEASE: ${{ needs.plan.outputs.provider_release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.provider_release }}
+          path: release
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: release/go.sum
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - name: Released provider acceptance tests
+        run: >-
+          python3 scripts/nightly.py leg --kind released-provider --name "provider $RELEASE / $REF" --ref "$REF" --out results --
+          make -C release test-acceptance-fresh OBOT_REF="$REF" OBOT_INSTANCES=2
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-leg-released-provider-${{ matrix.ref }}
+          path: |
+            results/
+            release/.obot/logs/
+          if-no-files-found: ignore
+
+  report:
+    name: Report
+    needs: [plan, acceptance, e2e, upgrade, released-provider]
+    # Runs when legs fail or time out, but not when someone cancels the run.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: nightly-leg-*
+          path: results
+      - name: Summarize, compare with the last passing run, and update issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOBS: ${{ toJSON(needs) }}
+          WARNINGS: ${{ needs.plan.outputs.warnings || '[]' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MANAGE_ISSUES: ${{ github.event_name == 'schedule' || inputs.manage_issues }}
+        run: |
+          flags=()
+          if [ "$MANAGE_ISSUES" = "true" ]; then flags+=(--manage-issues); fi
+          python3 scripts/nightly.py report --results results --out report --previous \
+            --jobs "$JOBS" --warnings "$WARNINGS" --run-url "$RUN_URL" "${flags[@]}"
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-report
+          path: report/
+          retention-days: 90
+          if-no-files-found: ignore

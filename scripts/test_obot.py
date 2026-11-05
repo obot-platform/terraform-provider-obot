@@ -141,16 +141,34 @@ class IsolationTests(ToolingTest):
     def test_log_artifacts_redact_setup_tokens_and_api_keys(self):
         with tempfile.TemporaryDirectory() as directory:
             state = {"name": "dev", "container": "test-container"}
-            data = {"Config": {"Env": ["OBOT_SETUP_TOKEN=private-setup-value"]}}
-            output = subprocess.CompletedProcess([], 0, "private-setup-value ok1-1-2-privatekey", "")
+            data = {"Image": "sha256:image", "Config": {"Env": [
+                "OBOT_SETUP_TOKEN=private-setup-value", "POSTGRES_PASSWORD=obot"]}}
+            image = {"Config": {"Env": ["POSTGRES_PASSWORD=obot"]}}
+            output = subprocess.CompletedProcess(
+                [], 0, "private-setup-value ok1-1-2-privatekey obot started", "")
             with patch.object(obot, "CACHE", Path(directory)), \
                     patch.object(obot, "load", return_value=state), \
                     patch.object(obot, "owned", return_value=data), \
+                    patch.object(obot, "inspect", return_value=image), \
                     patch.object(obot.subprocess, "run", return_value=output):
                 text = obot.logs("dev")
             self.assertNotIn("private-setup-value", text)
             self.assertNotIn("ok1-1-2-privatekey", text)
+            # The image's public default password is not a secret to redact.
+            self.assertIn("obot started", text)
             self.assertEqual((Path(directory) / "logs" / "dev.log").read_text(), text)
+
+    def test_log_artifacts_redact_a_password_overriding_the_image_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = {"Image": "sha256:image", "Config": {"Env": ["POSTGRES_PASSWORD=custom-secret"]}}
+            image = {"Config": {"Env": ["POSTGRES_PASSWORD=obot"]}}
+            output = subprocess.CompletedProcess([], 0, "custom-secret", "")
+            with patch.object(obot, "CACHE", Path(directory)), \
+                    patch.object(obot, "load", return_value={"name": "dev", "container": "c"}), \
+                    patch.object(obot, "owned", return_value=data), \
+                    patch.object(obot, "inspect", return_value=image), \
+                    patch.object(obot.subprocess, "run", return_value=output):
+                self.assertNotIn("custom-secret", obot.logs("dev"))
 
     def test_cleanup_refuses_foreign_containers_and_preserves_metadata(self):
         state = {"name": "dev", "container": "foreign", "volume": "foreign-data"}

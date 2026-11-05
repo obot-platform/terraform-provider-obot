@@ -1,0 +1,8 @@
+{
+  "$comment": [
+    "Obot versions this provider supports. CI tests each entry and main; see README, 'Nightly compatibility tests'.",
+    "A series such as v0.27 means its newest stable patch release, found when CI runs; an exact tag such as v0.26.3 pins one release.",
+    "List the oldest supported series first. When the nightly run reports an unlisted Obot release, add its series here and remove series you stop supporting."
+  ],
+  "supported": ["v0.26", "v0.27"]
+}

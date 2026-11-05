@@ -47,8 +47,9 @@ data "obot_current_user" "current" {}
 The provider requires Terraform 1.0 or later; write-only Git credential tokens
 require Terraform 1.11 or later, and importing by resource identity
 requires Terraform 1.12 or later. Releases are tested with Terraform 1.14
-against Obot v0.26.3 and `main`. Use an Owner or Admin API key to manage
-catalog sources and access policies.
+against `main` and the newest patch of each Obot release series listed in
+[`obot-versions.json`](obot-versions.json) (currently v0.26 and v0.27).
+Use an Owner or Admin API key to manage catalog sources and access policies.
 
 The provider accepts `base_url` and sensitive `token` attributes; explicit
 values take precedence over `OBOT_BASE_URL` and `OBOT_TOKEN`. Supply an app
@@ -211,8 +212,31 @@ make test
 make test-acceptance
 make test-acceptance OBOT_INSTANCE=release
 make test-acceptance-fresh OBOT_REF=main OBOT_INSTANCES=2
-make test-acceptance-fresh OBOT_REF=v0.26.3 OBOT_INSTANCES=2
+make test-acceptance-fresh OBOT_REF=v0.27.0 OBOT_INSTANCES=2
 ```
+
+Two further suites run the compiled provider through the Terraform CLI, as a
+user's pipeline does, on fresh instances with the same catalog fixtures:
+
+```shell
+make test-e2e OBOT_REF=main
+make test-upgrade UPGRADE_FROM=v0.27.0 UPGRADE_TO=main
+```
+
+`test-e2e` applies [`tests/e2e`](tests/e2e/main.tf), which uses every resource
+and data source with postconditions on what the API returns. It requires an
+empty plan after create, after an in-place update of every object, and after
+refresh. It then discards state and re-imports every object, first by ID and
+then by identity, and requires only the documented Git credential token resend.
+Finally it destroys and confirms through the API that the objects are gone and
+seeded defaults remain.
+
+`test-upgrade` applies the same scenario on one version, replaces the server
+with another image on the same data volume, and requires the earlier API key to
+work and the plan to be empty before updating and destroying on the new version.
+When the embedded PostgreSQL major version changes, as from v0.27 to main's
+PostgreSQL 18, it first follows Obot's documented dump-and-restore procedure.
+Both suites accept `--keep` through `python3 scripts/e2e.py` for diagnosis.
 
 Fresh acceptance runs include tests that add, adopt, and remove default catalog
 sources while leaving other sources and API-created entries in place, sync a
@@ -407,8 +431,60 @@ for final rendering checks. Published docs remain Markdown, styled by the Regist
 ## CI and releases
 
 CI builds and lints the provider, runs Go and tooling unit tests, and checks
-generated documentation. The acceptance workflow exercises both `main` and
-`v0.26.3` with two Docker instances using the same commands as local development.
+generated documentation. Its acceptance jobs, which wait for the build, run the smoke, acceptance,
+and end-to-end suites against `main` and each version in `obot-versions.json`,
+with two Docker instances, using the same commands as local development.
+
+### Supported Obot versions
+
+[`obot-versions.json`](obot-versions.json) is the single list of supported Obot
+versions. Each entry is a release series such as `v0.27`, meaning its newest
+stable patch when CI runs, or an exact tag such as `v0.26.3` to pin one. List
+the oldest supported series first; `main` is always tested. Preview what CI
+will test with:
+
+```shell
+make obot-versions
+```
+
+When Obot ships a new minor release, add its series, and remove series you stop
+supporting. You do not have to do this before CI notices: the nightly run
+finds the release itself.
+
+### Nightly compatibility tests
+
+Obot changes daily while this repository may not, so
+[`nightly.yml`](.github/workflows/nightly.yml) runs every day at 07:17 UTC,
+and on demand from the Actions tab. It needs no secrets: Obot runs in Docker on
+the runner, and issues use the workflow's own `GITHUB_TOKEN`.
+
+| Leg | Versions | What it catches |
+| --- | --- | --- |
+| Acceptance | `main` and each supported release | API changes affecting any resource or data source behavior |
+| End to end | `main` and each supported release | Breaks visible only through the compiled binary and Terraform CLI, import, and refresh |
+| Upgrade | each release to the next, newest release to `main` | Server migrations that change existing objects, leaving a non-empty plan |
+| Released provider | newest provider tag against each version | Breaks in the provider users actually run; skipped until the first release |
+
+Discovery: if Obot has a stable release newer than every listed series, the
+nightly run tests it too and opens an `obot-version-drift` issue asking for the
+file to be updated. The issue closes when it is.
+
+Flakes: each leg retries once. A leg that passes only on retry is shown as
+flaky in the summary but does not fail the run; repeated failures do.
+
+Provenance: each leg records the image digest and the Obot commit the server
+reports. For `main`, the Obot CLI used by the tests is built from that same
+commit, so an image published before or after the source cannot cause a false
+failure.
+
+Alerting: a scheduled run that fails opens one `nightly-failure` issue, or
+comments on the open one, with the summary table. When `main` fails, the
+summary links the Obot commit range since the last passing run, which is
+usually where to look. The issue closes on the next passing run. Manual runs
+change issues only with the `manage_issues` input.
+
+Reproduce a failing leg locally with the `make` command shown in its job log;
+sanitized server logs are in each leg's artifact.
 
 Pushing a `v*` tag, such as `v0.1.0`, runs GoReleaser to build, sign, and
 publish a GitHub release, which the Terraform Registry then picks up.

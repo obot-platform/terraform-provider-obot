@@ -52,15 +52,30 @@ jobs:
       - name: Check generated documentation
         run: git diff --exit-code
 
+  versions:
+    name: Resolve Obot versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      refs: ${{ steps.versions.outputs.refs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Only the versions obot-versions.json lists; the nightly workflow also
+      # discovers newer releases.
+      - id: versions
+        run: python3 scripts/obot_versions.py matrix --github-output
+
   acceptance:
     name: Obot ${{ matrix.obot }}
-    needs: build
+    needs: [build, versions]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        obot: [main, v0.26.3]
+        obot: ${{ fromJSON(needs.versions.outputs.refs) }}
+    env:
+      REF: ${{ matrix.obot }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Building the main Obot CLI requires Go 1.27; the provider itself
@@ -74,9 +89,11 @@ jobs:
           terraform_version: '1.14.0'
           terraform_wrapper: false
       - name: Check local authentication and instance isolation
-        run: make test-smoke OBOT_REF="${{ matrix.obot }}" OBOT_INSTANCES=2
+        run: make test-smoke OBOT_REF="$REF" OBOT_INSTANCES=2
       - name: Run Terraform acceptance tests
-        run: make test-acceptance-fresh OBOT_REF="${{ matrix.obot }}" OBOT_INSTANCES=2
+        run: make test-acceptance-fresh OBOT_REF="$REF" OBOT_INSTANCES=2
+      - name: Run the compiled provider end-to-end scenario
+        run: make test-e2e OBOT_REF="$REF"
       - name: Show sanitized failure logs
         if: failure()
         run: |

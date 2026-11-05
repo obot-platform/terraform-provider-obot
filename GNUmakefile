@@ -3,6 +3,8 @@
 OBOT_REF ?= main
 OBOT_INSTANCE ?= dev
 OBOT_INSTANCES ?= 1
+UPGRADE_FROM ?=
+UPGRADE_TO ?= main
 TESTARGS ?=
 TFARGS ?=
 DOCS_PORT ?= 8765
@@ -18,6 +20,11 @@ help:
 		'  OBOT_REF=main|v0.26.3         Select the server and CLI version' \
 		'  OBOT_INSTANCES=2              Include tests across multiple instances' \
 		'make test-smoke                 Create instances, check auth, then remove them' \
+		'make test-e2e                   Drive the compiled provider through tests/e2e' \
+		'  OBOT_REF=main|v0.27.0         Select the server and CLI version' \
+		'make test-upgrade               Apply, upgrade Obot in place, expect no changes' \
+		'  UPGRADE_FROM=v0.27.0 UPGRADE_TO=main' \
+		'make obot-versions              Show the Obot versions CI tests (obot-versions.json)' \
 		'make test-acceptance-env        Use OBOT_BASE_URL, OBOT_TOKEN, OBOT_TEST_EMAIL' \
 		'  TESTARGS="-run=TestAccNAME"    Select acceptance tests' \
 		'make obot-up / obot-down        Start / remove named instance (default: dev)' \
@@ -73,6 +80,16 @@ test-acceptance-fresh:
 test-smoke:
 	python3 scripts/obot.py smoke --ref "$(OBOT_REF)" --instances "$(OBOT_INSTANCES)"
 
+test-e2e:
+	python3 scripts/e2e.py e2e --ref "$(OBOT_REF)"
+
+test-upgrade:
+	@test -n "$(UPGRADE_FROM)" || { echo 'Set UPGRADE_FROM, for example UPGRADE_FROM=v0.27.0'; exit 2; }
+	python3 scripts/e2e.py upgrade --from "$(UPGRADE_FROM)" --to "$(UPGRADE_TO)"
+
+obot-versions:
+	python3 scripts/obot_versions.py show
+
 test-tooling:
 	python3 -m unittest discover -s scripts -p 'test_*.py'
 
@@ -123,5 +140,5 @@ dev-check: dev
 	python3 scripts/obot.py terraform "$*" destroy -- $(TFARGS)
 
 .PHONY: help build install lint generate docs-preview fmt test test-go test-tooling \
-	test-acceptance test-acceptance-env test-acceptance-fresh test-smoke \
+	test-acceptance test-acceptance-env test-acceptance-fresh test-smoke test-e2e test-upgrade obot-versions \
 	testacc testacc-local obot-smoke dev dev-check obot-source obot-cli obot-up obot-down
