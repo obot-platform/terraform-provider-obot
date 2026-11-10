@@ -189,6 +189,10 @@ class GitHub:
         finally:
             os.unlink(handle.name)
 
+    def close_issue(self, number, comment):
+        # gh issue close takes the comment text itself; it has no --body-file.
+        self.gh("issue", "close", str(number), "--comment", comment)
+
 
 def manage_issue(github, label, title, description, active, body, resolved_message, comment=True):
     """Keep one open issue per label while a condition holds; close it after.
@@ -207,7 +211,7 @@ def manage_issue(github, label, title, description, active, body, resolved_messa
         github.with_body(body, "issue", "create", "--title", title, "--label", label)
         return "opened an issue"
     if number:
-        github.with_body(resolved_message, "issue", "close", str(number), "--comment")
+        github.close_issue(number, resolved_message)
         return f"closed #{number}"
     return "nothing to do"
 

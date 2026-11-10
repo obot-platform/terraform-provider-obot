@@ -107,6 +107,9 @@ class FakeGitHub(nightly.GitHub):
     def with_body(self, body, *arguments):
         self.calls.append(arguments)
 
+    def close_issue(self, number, comment):
+        self.calls.append(("close", number, comment))
+
 
 class IssueTests(unittest.TestCase):
     def manage(self, github, active, comment=True):
@@ -132,7 +135,18 @@ class IssueTests(unittest.TestCase):
     def test_recovery_closes_the_issue(self):
         github = FakeGitHub(7)
         self.assertEqual(self.manage(github, False), "closed #7")
-        self.assertEqual(github.calls, [("issue", "close", "7", "--comment")])
+        self.assertEqual(github.calls, [("close", 7, "fixed")])
+
+    def test_close_passes_the_comment_text_to_gh(self):
+        commands = []
+
+        def runner(command, text, capture_output):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        nightly.GitHub(runner).close_issue(7, "fixed in run 1")
+        # gh issue close has no --body-file; --comment takes the text itself.
+        self.assertEqual(commands, [["gh", "issue", "close", "7", "--comment", "fixed in run 1"]])
 
     def test_passing_without_issue_does_nothing(self):
         github = FakeGitHub()

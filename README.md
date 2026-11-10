@@ -48,7 +48,7 @@ The provider requires Terraform 1.0 or later; write-only Git credential tokens
 require Terraform 1.11 or later, and importing by resource identity
 requires Terraform 1.12 or later. Releases are tested with Terraform 1.14
 against `main` and the newest patch of each Obot release series listed in
-[`obot-versions.json`](obot-versions.json) (currently v0.26 and v0.27).
+[`obot-versions.json`](obot-versions.json) (currently v0.26, v0.27, and v0.28).
 Use an Owner or Admin API key to manage catalog sources and access policies.
 
 The provider accepts `base_url` and sensitive `token` attributes; explicit
