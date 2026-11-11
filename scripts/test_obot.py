@@ -74,6 +74,39 @@ class ArtifactTests(ToolingTest):
             obot.release_binary(stream.getvalue(), "archive.tar.gz", "obot")
 
 
+class DownloadTests(ToolingTest):
+    class Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def error(self, code):
+        return obot.urllib.error.HTTPError("https://example.test", code, "error", {}, None)
+
+    def test_transient_errors_are_retried(self):
+        waits = []
+        responses = [self.error(504), obot.urllib.error.URLError("reset"), self.Response(b"ok")]
+        with patch.object(obot.urllib.request, "urlopen", side_effect=responses), \
+                patch.object(obot, "note"):
+            self.assertEqual(obot.download("https://example.test", sleep=waits.append), b"ok")
+        self.assertEqual(waits, [5, 10])
+
+    def test_client_errors_are_not_retried(self):
+        with patch.object(obot.urllib.request, "urlopen", side_effect=[self.error(404)]) as urlopen:
+            with self.assertRaises(obot.urllib.error.HTTPError):
+                obot.download("https://example.test", sleep=lambda _: None)
+        self.assertEqual(urlopen.call_count, 1)
+
+    def test_persistent_failure_gives_up(self):
+        with patch.object(obot.urllib.request, "urlopen", side_effect=[self.error(504)] * 4) as urlopen, \
+                patch.object(obot, "note"):
+            with self.assertRaises(obot.urllib.error.HTTPError):
+                obot.download("https://example.test", sleep=lambda _: None)
+        self.assertEqual(urlopen.call_count, 4)
+
+
 class SourceTests(ToolingTest):
     def test_existing_checkout_is_preserved(self):
         with tempfile.TemporaryDirectory() as directory:

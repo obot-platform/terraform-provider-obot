@@ -126,10 +126,25 @@ def source(ref, refresh=False, directory=None, revision=None):
     return path, commit
 
 
-def download(url):
+def download(url, attempts=4, delay=5, sleep=time.sleep):
+    """Fetch url, retrying transient failures such as GitHub's release CDN
+    answering 504, which otherwise fails a whole test leg."""
     request = urllib.request.Request(url, headers={"User-Agent": "terraform-provider-obot-testenv"})
-    with urllib.request.urlopen(request, timeout=120) as response:
-        return response.read()
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                return response.read()
+        except urllib.error.HTTPError as error:
+            if error.code not in (408, 429) and error.code < 500 or attempt == attempts:
+                raise
+            reason = f"HTTP {error.code}"
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            if attempt == attempts:
+                raise
+            reason = str(error)
+        wait = delay * 2 ** (attempt - 1)
+        note(f"Download of {url} failed ({reason}); retrying in {wait}s")
+        sleep(wait)
 
 
 def release_binary(archive, name, data):
