@@ -36,10 +36,30 @@ PASSWORD = "TestObotAdmin123!"
 ROLES = {"basic": 4, "owner": 8, "admin": 16, "auditor": 32,
          "power-user-plus": 64, "power-user": 128}
 LABEL = "ai.obot.terraform-test-project"
+# OBOT_TF_CLI selects the CLI every script drives, and each CLI expands
+# source "obot-platform/obot" to its own registry host. Development overrides
+# name both addresses so one CLI configuration serves either.
+CLIS = {"terraform": "registry.terraform.io", "tofu": "registry.opentofu.org"}
+PROVIDER_ADDRESSES = tuple(f"{host}/obot-platform/obot" for host in CLIS.values())
 
 
 class SetupError(Exception):
     pass
+
+
+def tf_cli():
+    """The Terraform-compatible CLI to run, from OBOT_TF_CLI (default terraform)."""
+    name = os.environ.get("OBOT_TF_CLI") or "terraform"
+    if name not in CLIS:
+        raise SetupError(f"OBOT_TF_CLI must be one of {', '.join(CLIS)}, not {name!r}")
+    return name
+
+
+def dev_overrides(binary_dir):
+    """CLI configuration text that loads the provider from binary_dir in either CLI."""
+    lines = "".join(f"    {json.dumps(address)} = {json.dumps(str(binary_dir))}\n"
+                    for address in PROVIDER_ADDRESSES)
+    return "provider_installation {\n  dev_overrides {\n" + lines + "  }\n  direct {}\n}\n"
 
 
 class HTTPFailure(SetupError):
@@ -675,6 +695,15 @@ def environment_for(states, email=None):
                         "OBOT_TEST_EMAIL": records[0]["email"],
                         "OBOT_TEST_INSTANCES": json.dumps(records),
                         "TF_ACC": "1"})
+    # terraform-plugin-testing runs terraform from PATH unless told otherwise.
+    name = tf_cli()
+    if name != "terraform":
+        path = shutil.which(name)
+        if not path:
+            raise SetupError(f"OBOT_TF_CLI={name} but {name} is not on PATH")
+        environment.update({"TF_ACC_TERRAFORM_PATH": path,
+                            "TF_ACC_PROVIDER_HOST": CLIS[name],
+                            "TF_ACC_PROVIDER_NAMESPACE": "obot-platform"})
     # CLI commands run with this environment use the matching cached CLI.
     binary = cli(states[0]["ref"], revision=states[0].get("cli_revision"))
     environment["PATH"] = str(binary.parent) + os.pathsep + environment.get("PATH", "")
@@ -705,10 +734,10 @@ def terraform(name, action, arguments):
         destination.symlink_to(source_path)
     environment["TF_CLI_CONFIG_FILE"] = str(config)
     environment["TF_DATA_DIR"] = str(directory / ".terraform")
-    command = ["terraform", f"-chdir={directory}"]
+    command = [tf_cli(), f"-chdir={directory}"]
     command.extend(["plan", "-destroy"] if action == "plan-destroy" else [action])
     command.extend(arguments)
-    note(f"{name}: terraform {action}; state in {directory}")
+    note(f"{name}: {command[0]} {action}; state in {directory}")
     # Inherit the terminal so apply/destroy retain Terraform's approval prompt.
     return subprocess.run(command, env=environment).returncode
 
@@ -759,7 +788,7 @@ def smoke(states):
 
 
 def build_provider(path):
-    """Compile this checkout's provider and write a Terraform CLI config that uses it.
+    """Compile this checkout's provider and write a CLI config that uses it.
 
     Returns the CLI config path. Terraform then runs the real plugin binary,
     exactly as a user's installation would, instead of the in-process harness.
@@ -769,9 +798,7 @@ def build_provider(path):
     binary_name = "terraform-provider-obot.exe" if os.name == "nt" else "terraform-provider-obot"
     run(["go", "build", "-o", binary_dir / binary_name, "."], cwd=ROOT)
     override = path / "dev.tfrc"
-    override.write_text("provider_installation {\n  dev_overrides {\n"
-                        '    "registry.terraform.io/obot-platform/obot" = ' +
-                        json.dumps(str(binary_dir)) + "\n  }\n  direct {}\n}\n")
+    override.write_text(dev_overrides(binary_dir))
     return override
 
 
@@ -831,9 +858,9 @@ output "second_email" {
             "TF_VAR_second_token": records[1]["token"],
         })
         plan = path / "plan"
-        run(["terraform", f"-chdir={path}", "plan", "-input=false", "-out", plan],
+        run([tf_cli(), f"-chdir={path}", "plan", "-input=false", "-out", plan],
             env=environment, capture=True)
-        result = json.loads(run(["terraform", f"-chdir={path}", "show", "-json", plan],
+        result = json.loads(run([tf_cli(), f"-chdir={path}", "show", "-json", plan],
                                 env=environment, capture=True))
         outputs = result["planned_values"]["outputs"]
         if (outputs["first_email"]["value"] != states[0]["email"] or

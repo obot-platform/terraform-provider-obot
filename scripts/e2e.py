@@ -2,8 +2,8 @@
 """End-to-end and upgrade tests for the compiled provider against real Obot.
 
 Unlike the acceptance tests, which run the provider in-process, these build
-the provider binary and drive tests/e2e with the Terraform CLI, as a user's
-pipeline would:
+the provider binary and drive tests/e2e with the Terraform or OpenTofu CLI
+(OBOT_TF_CLI), as a user's pipeline would:
 
   e2e      create, update, refresh, re-import by ID and by identity, destroy,
            then verify through the Obot API that only managed objects changed.
@@ -141,11 +141,11 @@ class Workspace:
             self.environment["TF_VAR_" + key] = str(value)
 
     def terraform(self, *arguments, capture=False, check=True):
-        command = ["terraform", f"-chdir={self.path}", *arguments]
+        command = [obot.tf_cli(), f"-chdir={self.path}", *arguments]
         result = subprocess.run(command, env=self.environment, text=True,
                                 stdout=subprocess.PIPE if capture else sys.stderr)
         if check and result.returncode:
-            raise E2EFailure(f"terraform {arguments[0]} failed (exit {result.returncode})")
+            raise E2EFailure(f"{command[0]} {arguments[0]} failed (exit {result.returncode})")
         return result
 
     def apply(self, stage, generation=1):

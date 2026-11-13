@@ -1,6 +1,10 @@
 # See https://goreleaser.com for configuration documentation.
 version: 2
 project_name: terraform-provider-obot
+snapshot:
+  # Terraform and OpenTofu lowercase prerelease versions found in a local
+  # mirror, so an uppercase SNAPSHOT never matches an exact version constraint.
+  version_template: '{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}'
 before:
   hooks:
     - go mod tidy

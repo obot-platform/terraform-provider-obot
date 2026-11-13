@@ -46,7 +46,8 @@ data "obot_current_user" "current" {}
 
 The provider requires Terraform 1.0 or later; write-only Git credential tokens
 require Terraform 1.11 or later, and importing by resource identity
-requires Terraform 1.12 or later. Releases are tested with Terraform 1.14
+requires Terraform 1.12 or later. OpenTofu works with the same `source`
+address. Releases are tested with Terraform 1.14 and OpenTofu 1.13
 against `main` and the newest patch of each Obot release series listed in
 [`obot-versions.json`](obot-versions.json) (currently v0.26, v0.27, and v0.28).
 Use an Owner or Admin API key to manage catalog sources and access policies.
@@ -65,7 +66,7 @@ under [Build and local Terraform development](#build-and-local-terraform-develop
 
 - Go >= 1.25.8 for the provider, as specified in `go.mod`
 - Go >= 1.27 to build the current Obot CLI from source
-- Terraform >= 1.13
+- Terraform >= 1.13, or OpenTofu >= 1.13 with `OBOT_TF_CLI=tofu` (see below)
 - Python >= 3.10 for local test tooling
 - Docker running locally for Obot test instances
 - OpenSSL >= 1.1.1 for the HTTPS catalog test fixtures
@@ -215,8 +216,18 @@ make test-acceptance-fresh OBOT_REF=main OBOT_INSTANCES=2
 make test-acceptance-fresh OBOT_REF=v0.27.0 OBOT_INSTANCES=2
 ```
 
-Two further suites run the compiled provider through the Terraform CLI, as a
-user's pipeline does, on fresh instances with the same catalog fixtures:
+Targets that start or use a named Obot instance use Terraform by default. Set `OBOT_TF_CLI=tofu`
+to drive OpenTofu instead: acceptance tests then run under `tofu` with the
+`registry.opentofu.org` provider address, and the smoke, end-to-end, upgrade,
+and `NAME-plan` targets call `tofu`:
+
+```shell
+make test-acceptance-fresh OBOT_REF=v0.28.0 OBOT_INSTANCES=2 OBOT_TF_CLI=tofu
+make test-e2e OBOT_REF=v0.28.0 OBOT_TF_CLI=tofu
+```
+
+Two further suites run the compiled provider through the Terraform or OpenTofu
+CLI, as a user's pipeline does, on fresh instances with the same catalog fixtures:
 
 ```shell
 make test-e2e OBOT_REF=main
@@ -332,6 +343,9 @@ terraform -chdir=examples/dev providers schema -json
 to `GOBIN`, or `$(go env GOPATH)/bin` when unset. `make dev` writes an ignored
 checkout-specific CLI configuration using
 [Terraform development overrides](https://developer.hashicorp.com/terraform/cli/config/config-file#development-overrides-for-provider-developers).
+It overrides both `registry.terraform.io/obot-platform/obot` and
+`registry.opentofu.org/obot-platform/obot`, because OpenTofu expands
+`obot-platform/obot` to its own registry, so the same file works with `tofu`.
 Re-run it after rebuilding or moving the checkout.
 
 Skip `terraform init` for this example: it still attempts to resolve the
@@ -434,6 +448,8 @@ CI builds and lints the provider, runs Go and tooling unit tests, and checks
 generated documentation. Its acceptance jobs, which wait for the build, run the smoke, acceptance,
 and end-to-end suites against `main` and each version in `obot-versions.json`,
 with two Docker instances, using the same commands as local development.
+An OpenTofu job runs the same three suites with `OBOT_TF_CLI=tofu` against the
+newest supported release.
 
 ### Supported Obot versions
 
@@ -455,13 +471,14 @@ finds the release itself.
 
 Obot changes daily while this repository may not, so
 [`nightly.yml`](.github/workflows/nightly.yml) runs every day at 07:17 UTC,
-and on demand from the Actions tab. It needs no secrets: Obot runs in Docker on
+and on demand from the Actions tab. The acceptance and end-to-end legs run
+once under Terraform and once under OpenTofu. It needs no secrets: Obot runs in Docker on
 the runner, and issues use the workflow's own `GITHUB_TOKEN`.
 
 | Leg | Versions | What it catches |
 | --- | --- | --- |
 | Acceptance | `main` and each supported release | API changes affecting any resource or data source behavior |
-| End to end | `main` and each supported release | Breaks visible only through the compiled binary and Terraform CLI, import, and refresh |
+| End to end | `main` and each supported release | Breaks visible only through the compiled binary and the Terraform or OpenTofu CLI, import, and refresh |
 | Upgrade | each release to the next, newest release to `main` | Server migrations that change existing objects, leaving a non-empty plan |
 | Released provider | newest provider tag against each version | Breaks in the provider users actually run; skipped until the first release |
 
@@ -487,7 +504,7 @@ Reproduce a failing leg locally with the `make` command shown in its job log;
 sanitized server logs are in each leg's artifact.
 
 Pushing a `v*` tag, such as `v0.1.0`, runs GoReleaser to build, sign, and
-publish a GitHub release, which the Terraform Registry then picks up.
+publish a GitHub release, which the Terraform and OpenTofu registries then pick up.
 [RELEASING.md](RELEASING.md) covers the one-time Registry setup and the
 release checklist.
 

@@ -58,6 +58,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       refs: ${{ steps.versions.outputs.refs }}
+      latest: ${{ steps.versions.outputs.latest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Only the versions obot-versions.json lists; the nightly workflow also
@@ -91,6 +92,39 @@ jobs:
       - name: Check local authentication and instance isolation
         run: make test-smoke OBOT_REF="$REF" OBOT_INSTANCES=2
       - name: Run Terraform acceptance tests
+        run: make test-acceptance-fresh OBOT_REF="$REF" OBOT_INSTANCES=2
+      - name: Run the compiled provider end-to-end scenario
+        run: make test-e2e OBOT_REF="$REF"
+      - name: Show sanitized failure logs
+        if: failure()
+        run: |
+          if [ -d .obot/logs ]; then
+            find .obot/logs -name '*.log' -exec cat {} +
+          fi
+
+  # The same checks driven by OpenTofu, against the newest supported Obot
+  # release only; the nightly workflow runs OpenTofu against every version.
+  opentofu:
+    name: OpenTofu / Obot ${{ needs.versions.outputs.latest }}
+    needs: [build, versions]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      REF: ${{ needs.versions.outputs.latest }}
+      OBOT_TF_CLI: tofu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+          cache: true
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: '1.13.9'
+          tofu_wrapper: false
+      - name: Check local authentication and instance isolation
+        run: make test-smoke OBOT_REF="$REF" OBOT_INSTANCES=2
+      - name: Run OpenTofu acceptance tests
         run: make test-acceptance-fresh OBOT_REF="$REF" OBOT_INSTANCES=2
       - name: Run the compiled provider end-to-end scenario
         run: make test-e2e OBOT_REF="$REF"

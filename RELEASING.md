@@ -91,7 +91,9 @@ add:
    }
    ```
 
-7. Add a new `## X.Y.Z (Unreleased)` heading to `CHANGELOG.md` for the next release.
+7. **First release only:** list the provider in the OpenTofu Registry, as
+   described under [OpenTofu Registry](#opentofu-registry).
+8. Add a new `## X.Y.Z (Unreleased)` heading to `CHANGELOG.md` for the next release.
 
 If a version does not appear, check the provider's settings page in the Registry.
 A missing webhook is fixed by deleting any `registry.terraform.io` webhooks on
@@ -104,9 +106,27 @@ To check the build without signing or publishing:
 goreleaser release --snapshot --clean --skip=sign,publish
 ```
 
-## Optional: OpenTofu Registry
+## OpenTofu Registry
 
-OpenTofu users can install the provider once it is listed in the OpenTofu
-Registry. Submit the provider and the same public key through the issue forms at
-<https://github.com/opentofu/registry>. Later releases are picked up from GitHub
-releases.
+OpenTofu resolves `obot-platform/obot` to `registry.opentofu.org`, a separate
+index of the same GitHub releases. CI already tests the provider under OpenTofu;
+listing it is a one-time step after the first Terraform Registry release:
+
+1. Make your `obot-platform` membership public on GitHub
+   (on <https://github.com/orgs/obot-platform/people>, set your
+   visibility to **Public**). The key submission fails
+   automated validation otherwise.
+2. Open the [Submit new Provider](https://github.com/opentofu/registry/issues/new?template=provider.yml)
+   form and enter `obot-platform/terraform-provider-obot`.
+3. Open the [Submit new Provider Signing Key](https://github.com/opentofu/registry/issues/new?template=provider_key.yml)
+   form with namespace `obot-platform` and the contents of
+   `obot-terraform-public.asc`.
+
+Use the web forms: the OpenTofu registry closes submissions created with `gh`
+or the API. Once both issues are processed, later releases are picked up from
+GitHub automatically. Confirm with `tofu init` and the same `required_providers`
+block as above, without development overrides.
+
+Neither registry removes a published version, so a broken release is fixed by
+releasing a new one. Consider enabling GitHub's immutable releases on the
+repository.

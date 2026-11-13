@@ -286,5 +286,57 @@ class TerraformTests(ToolingTest):
             self.assertEqual(first.args[0][-1], "-no-color")
 
 
+class CLITests(ToolingTest):
+    STATE = {"name": "one", "url": "http://127.0.0.1:10001", "email": "one@example.com", "ref": "main"}
+
+    def environment(self):
+        with patch.object(obot, "token", return_value="key"), \
+                patch.object(obot, "cli", return_value=Path("/test/bin/obot")), \
+                patch.object(obot.shutil, "which", return_value="/test/bin/tofu"):
+            return obot.environment_for([self.STATE])
+
+    def test_terraform_is_the_default_and_unknown_clis_are_refused(self):
+        obot.os.environ.pop("OBOT_TF_CLI", None)
+        self.assertEqual(obot.tf_cli(), "terraform")
+        obot.os.environ["OBOT_TF_CLI"] = "tofu"
+        self.assertEqual(obot.tf_cli(), "tofu")
+        obot.os.environ["OBOT_TF_CLI"] = "/usr/bin/terraform"
+        with self.assertRaises(obot.SetupError):
+            obot.tf_cli()
+
+    def test_dev_overrides_name_both_registry_addresses(self):
+        text = obot.dev_overrides(Path("/test/bin"))
+        self.assertIn('"registry.terraform.io/obot-platform/obot" = "/test/bin"', text)
+        self.assertIn('"registry.opentofu.org/obot-platform/obot" = "/test/bin"', text)
+
+    def test_acceptance_tests_run_opentofu_under_its_registry_host(self):
+        obot.os.environ["OBOT_TF_CLI"] = "tofu"
+        environment = self.environment()
+        self.assertEqual(environment["TF_ACC_TERRAFORM_PATH"], "/test/bin/tofu")
+        self.assertEqual(environment["TF_ACC_PROVIDER_HOST"], "registry.opentofu.org")
+        self.assertEqual(environment["TF_ACC_PROVIDER_NAMESPACE"], "obot-platform")
+
+    def test_acceptance_tests_leave_terraform_to_the_harness_defaults(self):
+        obot.os.environ.pop("OBOT_TF_CLI", None)
+        environment = self.environment()
+        self.assertNotIn("TF_ACC_TERRAFORM_PATH", environment)
+        self.assertNotIn("TF_ACC_PROVIDER_HOST", environment)
+
+    def test_named_instance_targets_run_the_selected_cli(self):
+        obot.os.environ["OBOT_TF_CLI"] = "tofu"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "dev.tfrc").touch()
+            (root / "examples" / "dev").mkdir(parents=True)
+            with patch.object(obot, "ROOT", root), \
+                    patch.object(obot, "CACHE", root / ".obot"), \
+                    patch.object(obot, "load", side_effect=lambda name: {"name": name}), \
+                    patch.object(obot, "environment_for", return_value={}), \
+                    patch.object(obot.subprocess, "run",
+                                 return_value=subprocess.CompletedProcess([], 0)) as run:
+                obot.main(["terraform", "dev", "plan"])
+        self.assertEqual(run.call_args.args[0][0], "tofu")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,9 @@ UPGRADE_FROM ?=
 UPGRADE_TO ?= main
 TESTARGS ?=
 TFARGS ?=
+# The CLI the test and instance targets drive: terraform or tofu.
+OBOT_TF_CLI ?= terraform
+export OBOT_TF_CLI
 DOCS_PORT ?= 8765
 DOCS_PREVIEW_ENV = .obot/docs-preview/venv
 ACCEPTANCE_TEST = go test -count=1 -timeout=60m -run=TestAcc $(TESTARGS) ./internal/provider/...
@@ -24,6 +27,7 @@ help:
 		'  OBOT_REF=main|v0.27.0         Select the server and CLI version' \
 		'make test-upgrade               Apply, upgrade Obot in place, expect no changes' \
 		'  UPGRADE_FROM=v0.27.0 UPGRADE_TO=main' \
+		'  OBOT_TF_CLI=tofu              Use OpenTofu in targets that run Obot instances' \
 		'make obot-versions              Show the Obot versions CI tests (obot-versions.json)' \
 		'make test-acceptance-env        Use OBOT_BASE_URL, OBOT_TOKEN, OBOT_TEST_EMAIL' \
 		'  TESTARGS="-run=TestAccNAME"    Select acceptance tests' \
@@ -116,14 +120,15 @@ dev: build
 		'provider_installation {' \
 		'  dev_overrides {' \
 		'    "registry.terraform.io/obot-platform/obot" = "$(CURDIR)/bin"' \
+		'    "registry.opentofu.org/obot-platform/obot" = "$(CURDIR)/bin"' \
 		'  }' \
 		'  direct {}' \
 		'}' > dev.tfrc
 	@echo 'Run: export TF_CLI_CONFIG_FILE="$(CURDIR)/dev.tfrc"'
 
 dev-check: dev
-	TF_CLI_CONFIG_FILE="$(CURDIR)/dev.tfrc" terraform -chdir=examples/dev providers schema -json > /dev/null
-	TF_CLI_CONFIG_FILE="$(CURDIR)/dev.tfrc" terraform -chdir=examples/dev validate
+	TF_CLI_CONFIG_FILE="$(CURDIR)/dev.tfrc" $(OBOT_TF_CLI) -chdir=examples/dev providers schema -json > /dev/null
+	TF_CLI_CONFIG_FILE="$(CURDIR)/dev.tfrc" $(OBOT_TF_CLI) -chdir=examples/dev validate
 
 # The target prefix is the existing Obot instance name. Each uses separate
 # Terraform state while sharing the development example configuration.
