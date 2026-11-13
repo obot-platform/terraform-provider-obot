@@ -1,5 +1,7 @@
 # Nightly compatibility of the provider with Obot main and every supported
-# release. Upstream Obot changes daily while this repository may not, so this
+# release, with acceptance and end-to-end legs under both Terraform and
+# OpenTofu. The upgrade leg tests Obot's own migrations and the released-provider
+# leg runs that release's tooling, so both use Terraform only. Upstream Obot changes daily while this repository may not, so this
 # runs on a schedule rather than on pushes. See README, "Nightly compatibility
 # tests". No secrets are needed: Obot runs in Docker on the runner, and issues
 # are managed with the workflow's own GITHUB_TOKEN.
@@ -24,6 +26,7 @@ concurrency:
 
 env:
   TERRAFORM_VERSION: '1.14.0'
+  OPENTOFU_VERSION: '1.13.9'
   # Building the main Obot CLI requires Go 1.27; the provider itself
   # continues to support the Go version declared in go.mod.
   GO_VERSION: '1.27.x'
@@ -44,7 +47,7 @@ jobs:
         run: python3 scripts/obot_versions.py matrix --discover --provider-remote origin --github-output
 
   acceptance:
-    name: Acceptance / Obot ${{ matrix.ref }}
+    name: Acceptance / ${{ matrix.cli }} / Obot ${{ matrix.ref }}
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -52,33 +55,41 @@ jobs:
       fail-fast: false
       matrix:
         ref: ${{ fromJSON(needs.plan.outputs.refs) }}
+        cli: [terraform, tofu]
     env:
       REF: ${{ matrix.ref }}
+      OBOT_TF_CLI: ${{ matrix.cli }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+      - if: matrix.cli == 'terraform'
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
+      - if: matrix.cli == 'tofu'
+        uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: ${{ env.OPENTOFU_VERSION }}
+          tofu_wrapper: false
       - name: Smoke and acceptance tests
         run: >-
-          python3 scripts/nightly.py leg --kind acceptance --name "acceptance / $REF" --ref "$REF" --out results --
+          python3 scripts/nightly.py leg --kind acceptance --name "acceptance / $OBOT_TF_CLI / $REF" --ref "$REF" --out results --
           sh -c 'make test-smoke OBOT_REF="$REF" OBOT_INSTANCES=2 && make test-acceptance-fresh OBOT_REF="$REF" OBOT_INSTANCES=2'
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: nightly-leg-acceptance-${{ matrix.ref }}
+          name: nightly-leg-acceptance-${{ matrix.cli }}-${{ matrix.ref }}
           path: |
             results/
             .obot/logs/
           if-no-files-found: ignore
 
   e2e:
-    name: End to end / Obot ${{ matrix.ref }}
+    name: End to end / ${{ matrix.cli }} / Obot ${{ matrix.ref }}
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -86,26 +97,34 @@ jobs:
       fail-fast: false
       matrix:
         ref: ${{ fromJSON(needs.plan.outputs.refs) }}
+        cli: [terraform, tofu]
     env:
       REF: ${{ matrix.ref }}
+      OBOT_TF_CLI: ${{ matrix.cli }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+      - if: matrix.cli == 'terraform'
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
+      - if: matrix.cli == 'tofu'
+        uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: ${{ env.OPENTOFU_VERSION }}
+          tofu_wrapper: false
       - name: Compiled provider scenario
         run: >-
-          python3 scripts/nightly.py leg --kind e2e --name "e2e / $REF" --ref "$REF" --out results --
+          python3 scripts/nightly.py leg --kind e2e --name "e2e / $OBOT_TF_CLI / $REF" --ref "$REF" --out results --
           make test-e2e OBOT_REF="$REF"
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: nightly-leg-e2e-${{ matrix.ref }}
+          name: nightly-leg-e2e-${{ matrix.cli }}-${{ matrix.ref }}
           path: |
             results/
             .obot/logs/

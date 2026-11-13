@@ -87,6 +87,7 @@ class ConfigTests(unittest.TestCase):
             values = dict(line.split("=", 1) for line in output.read().splitlines())
         self.assertEqual(json.loads(values["refs"]), ["v0.27.0", "main"])
         self.assertEqual(values["provider_release"], "v0.1.0")
+        self.assertEqual(values["latest"], "v0.27.0")
         self.assertEqual(json.loads(values["upgrades"]), [{"from": "v0.27.0", "to": "main"}])
 
 

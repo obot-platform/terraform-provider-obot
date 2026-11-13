@@ -110,6 +110,8 @@ def write_github_output(plan, provider_release):
     with open(path, "a") as handle:
         handle.write(f"refs={json.dumps(plan['refs'])}\n")
         handle.write(f"releases={json.dumps([r['ref'] for r in plan['releases']])}\n")
+        # The newest tested release, for jobs that cover one version only.
+        handle.write(f"latest={plan['releases'][-1]['ref'] if plan['releases'] else 'main'}\n")
         handle.write(f"upgrades={json.dumps(plan['upgrades'])}\n")
         handle.write(f"provider_release={provider_release or ''}\n")
         handle.write(f"warnings={json.dumps(plan['warnings'])}\n")
